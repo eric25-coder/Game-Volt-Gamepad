@@ -11,6 +11,9 @@ on:
       - master
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build-android-apk:
     name: Build Debug APK (Game Volt Gamepad)
@@ -20,38 +23,32 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: 'npm'
-
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '21'
-          cache: 'gradle'
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install NPM dependencies
-        run: npm install
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
 
-      - name: Build web application bundle
-        run: npm run build
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
 
-      - name: Sync existing Capacitor Android project
-        run: npx cap sync android
+      - name: Build web application
+        run: bun run build
 
-      - name: Ensure Gradle wrapper is executable
-        working-directory: ./android
-        run: chmod +x gradlew
+      - name: Sync Capacitor Android
+        run: bunx cap sync android
 
-      - name: Assemble Debug APK with Gradle
-        working-directory: ./android
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+      - name: Build APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Verify generated APK output
         run: ls -lh android/app/build/outputs/apk/debug/app-debug.apk
@@ -62,3 +59,4 @@ jobs:
           name: Game-Volt-Gamepad-debug-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+          retention-days: 14

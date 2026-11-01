@@ -11,7 +11,8 @@ android/local.properties
 *.apk
 *.aab
 
-# Always keep Gradle Wrapper files tracked in Git
+# Always keep Bun lockfile and Gradle Wrapper files tracked in Git
+!bun.lock
 !android/gradlew
 !android/gradlew.bat
 !android/gradle/
