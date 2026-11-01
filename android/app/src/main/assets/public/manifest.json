@@ -1,0 +1,20 @@
+{
+  "id": "/",
+  "name": "Game Volt gamepad",
+  "short_name": "Game Volt",
+  "description": "Game Volt gamepad - Universal Bluetooth HID & Wi-Fi wireless game controller for Windows PC and Android TV.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#07080a",
+  "theme_color": "#07080a",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

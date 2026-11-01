@@ -1,0 +1,6 @@
+{
+  "name": "Erico Universal Gamepad",
+  "description": "A premium wireless smartphone game controller application using WebSockets for PC and TV connectivity.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

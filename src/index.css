@@ -1,0 +1,57 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  body {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    background-color: #07080a;
+    color: #f3f4f6;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    overscroll-behavior: none;
+  }
+
+  .font-display {
+    font-family: 'Orbitron', sans-serif;
+  }
+
+  .font-mono-tabular {
+    font-family: 'JetBrains Mono', monospace;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@keyframes rgb-rainbow {
+  0% { filter: hue-rotate(0deg); }
+  100% { filter: hue-rotate(360deg); }
+}
+
+@keyframes rgb-breathe {
+  0%, 100% { opacity: 0.45; transform: scale(0.995); }
+  50% { opacity: 1; transform: scale(1.01); }
+}
+
+.animate-rgb-rainbow {
+  animation: rgb-rainbow 6s linear infinite;
+}
+
+.animate-rgb-breathe {
+  animation: rgb-breathe 3.2s ease-in-out infinite;
+}
+
+/* Custom scrollbar for drawers */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0d0e12;
+}
+::-webkit-scrollbar-thumb {
+  background: #272a34;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3b3f4e;
+}
