@@ -156,6 +156,58 @@ export default function App() {
 
   const [profile, setProfile] = useState<ControllerProfile>(DEFAULT_GAMEVOLT_PROFILE);
 
+  // Android Screen Wake Lock & Hardware Back Button handling
+  useEffect(() => {
+    let wakeLockSentinel: { release?: () => Promise<void> } | null = null;
+
+    const requestAndroidWakeLock = async () => {
+      try {
+        const nav = navigator as Navigator & {
+          wakeLock?: { request: (type: 'screen') => Promise<{ release?: () => Promise<void> }> };
+        };
+        if (nav.wakeLock && document.visibilityState === 'visible') {
+          wakeLockSentinel = await nav.wakeLock.request('screen');
+        }
+      } catch {
+        // Ignore if wakeLock is restricted
+      }
+    };
+
+    void requestAndroidWakeLock();
+
+    const handleVisibilityWake = () => {
+      if (document.visibilityState === 'visible') {
+        void requestAndroidWakeLock();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityWake);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityWake);
+      void wakeLockSentinel?.release?.();
+    };
+  }, []);
+
+  // Android Back Button closes open drawer/overlay instead of exiting app
+  useEffect(() => {
+    if (activeModal !== 'none' || keyboardMouseMode !== 'none') {
+      window.history.pushState({ modalOpen: true }, '');
+    }
+
+    const handlePopState = () => {
+      if (activeModal !== 'none') {
+        setActiveModal('none');
+      } else if (keyboardMouseMode !== 'none') {
+        setKeyboardMouseMode('none');
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, [activeModal, keyboardMouseMode]);
+
   // Automatic failsafe release on window blur, visibility change, or pagehide to prevent stuck buttons
   useEffect(() => {
     const handleFailsafeReleaseAll = () => {
@@ -288,7 +340,15 @@ export default function App() {
 
   const handleToggleFullscreen = () => {
     if (!document.fullscreenElement) {
-      document.documentElement.requestFullscreen?.().catch(() => {});
+      document.documentElement
+        .requestFullscreen?.()
+        .then(() => {
+          const scr = screen as Screen & {
+            orientation?: { lock?: (mode: string) => Promise<void> };
+          };
+          scr.orientation?.lock?.('landscape').catch(() => {});
+        })
+        .catch(() => {});
     } else {
       document.exitFullscreen?.().catch(() => {});
     }

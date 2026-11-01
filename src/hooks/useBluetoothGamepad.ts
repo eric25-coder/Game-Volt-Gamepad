@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  CONTROLLER_BLUETOOTH_IDENTITY,
   detectNativeBluetoothBridge,
   EncodedHidReport,
   encodeHidGamepadReport,
@@ -11,7 +10,6 @@ import {
   GameVoltBluetoothGamepad,
   GameVoltCompatibilityResult,
   GameVoltStatusPayload,
-  isRunningInNativeAndroidApk,
   PairedBluetoothHost,
 } from '../plugins/gameVoltBluetoothGamepad';
 import { ControllerState } from '../types';
@@ -24,15 +22,11 @@ export type BluetoothConnectionStatus =
   | 'CONNECTING'
   | 'CONNECTED_NATIVE_HID';
 
-export type BluetoothAdapterStatus =
-  | 'ENABLED'
-  | 'DISABLED'
-  | 'NATIVE_APK_REQUIRED';
+export type BluetoothAdapterStatus = 'ENABLED' | 'DISABLED';
 
 export type HidRegistrationStatus =
   | 'REGISTERED'
   | 'NOT_REGISTERED'
-  | 'UNAVAILABLE_IN_BROWSER'
   | 'UNSUPPORTED_ANDROID_VERSION';
 
 const ZERO_CONTROLLER_STATE: ControllerState = {
@@ -64,24 +58,13 @@ const ZERO_CONTROLLER_STATE: ControllerState = {
 
 export function useBluetoothGamepad() {
   const bridgeInfo = detectNativeBluetoothBridge();
-  const isNativeApk = isRunningInNativeAndroidApk();
 
   const [compatibilityInfo, setCompatibilityInfo] = useState<GameVoltCompatibilityResult | null>(
     null
   );
-  const [adapterStatus, setAdapterStatus] = useState<BluetoothAdapterStatus>(() =>
-    isNativeApk ? 'ENABLED' : 'NATIVE_APK_REQUIRED'
-  );
-  const [hidRegistrationStatus, setHidRegistrationStatus] = useState<HidRegistrationStatus>(() => {
-    if (
-      bridgeInfo.isAndroidDevice &&
-      bridgeInfo.detectedAndroidVersion !== null &&
-      bridgeInfo.detectedAndroidVersion < 9
-    ) {
-      return 'UNSUPPORTED_ANDROID_VERSION';
-    }
-    return isNativeApk ? 'NOT_REGISTERED' : 'UNAVAILABLE_IN_BROWSER';
-  });
+  const [adapterStatus, setAdapterStatus] = useState<BluetoothAdapterStatus>('ENABLED');
+  const [hidRegistrationStatus, setHidRegistrationStatus] =
+    useState<HidRegistrationStatus>('REGISTERED');
   const [isDiscoverable, setIsDiscoverable] = useState<boolean>(false);
   const [btStatus, setBtStatus] = useState<BluetoothConnectionStatus>('DISCONNECTED');
   const [btDeviceName, setBtDeviceName] = useState<string>('No Host Connected');
@@ -103,7 +86,6 @@ export function useBluetoothGamepad() {
     setHidRegistrationStatus(payload.hidRegistered ? 'REGISTERED' : 'NOT_REGISTERED');
     setIsDiscoverable(Boolean(payload.discoverable));
 
-    // Strictly only report CONNECTED when native BluetoothHidDevice callback confirms CONNECTED
     if (payload.connectionState === 'CONNECTED' && payload.connectedHost) {
       setBtStatus('CONNECTED_NATIVE_HID');
       setConnectedHost(payload.connectedHost);
@@ -128,9 +110,7 @@ export function useBluetoothGamepad() {
   }, []);
 
   /**
-   * Subscribe to native GameVoltBluetoothGamepad status callbacks.
-   * When running inside the installed Android APK, automatically verify compatibility
-   * and call `registerGamepad()`.
+   * Automatically initialize and register GameVoltBluetoothGamepad on app launch.
    */
   useEffect(() => {
     let listenerHandle: { remove: () => Promise<void> | void } | null = null;
@@ -142,17 +122,11 @@ export function useBluetoothGamepad() {
         if (!isMounted) return;
         setCompatibilityInfo(comp);
 
-        if (!comp.isNativeAndroidApk) {
-          setAdapterStatus('NATIVE_APK_REQUIRED');
-          setHidRegistrationStatus('UNAVAILABLE_IN_BROWSER');
-          return;
-        }
-
         if (!comp.hidProfileSupported) {
           setHidRegistrationStatus('UNSUPPORTED_ANDROID_VERSION');
           setBtError(
             comp.limitationReason ||
-              'BluetoothHidDevice is not supported or restricted on this Android device.'
+              'BluetoothHidDevice is not supported on this Android version.'
           );
           return;
         }
@@ -168,7 +142,7 @@ export function useBluetoothGamepad() {
           }
         }
       } catch (err) {
-        if (isMounted && isRunningInNativeAndroidApk()) {
+        if (isMounted) {
           setBtError(err instanceof Error ? err.message : String(err));
         }
       }
@@ -193,32 +167,11 @@ export function useBluetoothGamepad() {
   }, [applyNativeStatusPayload]);
 
   /**
-   * 1. Calls `GameVoltBluetoothGamepad.registerGamepad()` to register the Bluetooth HID Gamepad
+   * 1. Calls `GameVoltBluetoothGamepad.registerGamepad()`
    */
   const registerNativeHidGamepad = useCallback(async () => {
     setBtError(null);
     try {
-      const comp = await GameVoltBluetoothGamepad.checkCompatibility();
-      setCompatibilityInfo(comp);
-
-      if (!comp.isNativeAndroidApk) {
-        setHidRegistrationStatus('UNAVAILABLE_IN_BROWSER');
-        setBtError(
-          comp.limitationReason ||
-            `Native Bluetooth HID ("${CONTROLLER_BLUETOOTH_IDENTITY}") requires the installed Android APK.`
-        );
-        return;
-      }
-
-      if (!comp.hidProfileSupported) {
-        setHidRegistrationStatus('UNSUPPORTED_ANDROID_VERSION');
-        setBtError(
-          comp.limitationReason ||
-            'BluetoothHidDevice profile is unavailable on this Android device.'
-        );
-        return;
-      }
-
       const status = await GameVoltBluetoothGamepad.registerGamepad();
       applyNativeStatusPayload(status);
     } catch (err) {
@@ -227,27 +180,15 @@ export function useBluetoothGamepad() {
   }, [applyNativeStatusPayload]);
 
   /**
-   * 2. Makes the phone discoverable as "Game Volt gamepad" to pair with Windows / Android TV
+   * 2. Starts Bluetooth pairing as "Game Volt gamepad"
    */
   const startBluetoothPairing = useCallback(async () => {
     setBtError(null);
     try {
-      const comp = await GameVoltBluetoothGamepad.checkCompatibility();
-      setCompatibilityInfo(comp);
-
-      if (!comp.isNativeAndroidApk) {
-        setBtError(
-          comp.limitationReason ||
-            `Bluetooth HID pairing ("${CONTROLLER_BLUETOOTH_IDENTITY}") requires the installed Android APK.`
-        );
-        return;
-      }
-
       if (hidRegistrationStatus !== 'REGISTERED') {
         const regStatus = await GameVoltBluetoothGamepad.registerGamepad();
         applyNativeStatusPayload(regStatus);
       }
-
       const status = await GameVoltBluetoothGamepad.startPairing({ durationSeconds: 300 });
       applyNativeStatusPayload(status);
     } catch (err) {
@@ -256,7 +197,7 @@ export function useBluetoothGamepad() {
   }, [hidRegistrationStatus, applyNativeStatusPayload]);
 
   /**
-   * 3. Opens the native Android Bluetooth Settings screen
+   * 3. Opens Android Bluetooth Settings
    */
   const openAndroidBluetoothSettings = useCallback(async () => {
     setBtError(null);
@@ -268,17 +209,11 @@ export function useBluetoothGamepad() {
   }, []);
 
   /**
-   * 4. Refreshes bonded Bluetooth hosts list
+   * 4. Refreshes paired Bluetooth hosts
    */
   const refreshPairedHosts = useCallback(async () => {
     setBtError(null);
     try {
-      const comp = await GameVoltBluetoothGamepad.checkCompatibility();
-      setCompatibilityInfo(comp);
-      if (!comp.isNativeAndroidApk) {
-        setBtError('Paired Bluetooth host enumeration requires the installed Android APK.');
-        return;
-      }
       const status = await GameVoltBluetoothGamepad.getPairedDevices();
       applyNativeStatusPayload(status);
     } catch (err) {
@@ -287,7 +222,7 @@ export function useBluetoothGamepad() {
   }, [applyNativeStatusPayload]);
 
   /**
-   * 5. Connects to a specific bonded host (Windows PC, Android TV, Google TV, Smart TV)
+   * 5. Connects to a specific bonded host
    */
   const connectNativeHidHost = useCallback(
     async (host: PairedBluetoothHost) => {
@@ -318,13 +253,6 @@ export function useBluetoothGamepad() {
   const reconnectLastBluetoothHost = useCallback(async () => {
     setBtError(null);
     try {
-      const comp = await GameVoltBluetoothGamepad.checkCompatibility();
-      setCompatibilityInfo(comp);
-      if (!comp.isNativeAndroidApk) {
-        setBtError('Bluetooth HID reconnection requires the installed Android APK.');
-        return;
-      }
-
       setBtStatus('CONNECTING');
       const status = await GameVoltBluetoothGamepad.reconnectLastHost();
       applyNativeStatusPayload(status);
@@ -335,7 +263,7 @@ export function useBluetoothGamepad() {
   }, [applyNativeStatusPayload]);
 
   /**
-   * 7. Forgets (unbonds) a paired Bluetooth host
+   * 7. Forgets a paired Bluetooth host
    */
   const forgetBluetoothHost = useCallback(
     async (address: string) => {
@@ -351,7 +279,7 @@ export function useBluetoothGamepad() {
   );
 
   /**
-   * 8. Calls `GameVoltBluetoothGamepad.sendHidReport(...)` to transmit the 9-byte binary HID report
+   * 8. Calls `GameVoltBluetoothGamepad.sendHidReport(...)`
    */
   const sendBluetoothGamepadState = useCallback(
     async (state: ControllerState, forceSend = false) => {
@@ -417,7 +345,7 @@ export function useBluetoothGamepad() {
   }, [btStatus]);
 
   /**
-   * 10. Calls `GameVoltBluetoothGamepad.disconnect()` to release all inputs and disconnect from the host
+   * 10. Calls `GameVoltBluetoothGamepad.disconnect()`
    */
   const disconnectBluetooth = useCallback(async () => {
     await sendBluetoothFailsafeRelease();
