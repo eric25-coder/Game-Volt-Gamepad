@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">Game Volt gamepad</string>
-    <string name="title_activity_main">Game Volt gamepad</string>
+    <string name="app_name">Game Volt Gamepad</string>
+    <string name="title_activity_main">Game Volt Gamepad</string>
     <string name="package_name">com.gamevolt.gamepad</string>
     <string name="custom_url_scheme">com.gamevolt.gamepad</string>
 </resources>

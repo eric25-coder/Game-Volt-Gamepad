@@ -62,9 +62,9 @@ export function useBluetoothGamepad() {
   const [compatibilityInfo, setCompatibilityInfo] = useState<GameVoltCompatibilityResult | null>(
     null
   );
-  const [adapterStatus, setAdapterStatus] = useState<BluetoothAdapterStatus>('ENABLED');
+  const [adapterStatus, setAdapterStatus] = useState<BluetoothAdapterStatus>('DISABLED');
   const [hidRegistrationStatus, setHidRegistrationStatus] =
-    useState<HidRegistrationStatus>('REGISTERED');
+    useState<HidRegistrationStatus>('NOT_REGISTERED');
   const [isDiscoverable, setIsDiscoverable] = useState<boolean>(false);
   const [btStatus, setBtStatus] = useState<BluetoothConnectionStatus>('DISCONNECTED');
   const [btDeviceName, setBtDeviceName] = useState<string>('No Host Connected');
@@ -180,7 +180,7 @@ export function useBluetoothGamepad() {
   }, [applyNativeStatusPayload]);
 
   /**
-   * 2. Starts Bluetooth pairing as "Game Volt gamepad"
+   * 2. Starts Bluetooth pairing as "Game Volt Gamepad"
    */
   const startBluetoothPairing = useCallback(async () => {
     setBtError(null);

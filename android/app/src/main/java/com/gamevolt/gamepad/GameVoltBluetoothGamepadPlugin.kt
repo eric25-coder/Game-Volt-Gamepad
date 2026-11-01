@@ -34,7 +34,7 @@ import kotlin.math.roundToInt
 /**
  * GameVoltBluetoothGamepadPlugin
  *
- * Native Android BluetoothHidDevice Capacitor Plugin ("GameVoltBluetoothGamepad") for Game Volt gamepad.
+ * Native Android BluetoothHidDevice Capacitor Plugin ("GameVoltBluetoothGamepad") for Game Volt Gamepad.
  * Exposes core methods called by the TypeScript frontend:
  * - registerGamepad(call: PluginCall)
  * - sendHidReport(call: PluginCall)
@@ -64,7 +64,7 @@ import kotlin.math.roundToInt
 class GameVoltBluetoothGamepadPlugin : Plugin() {
 
     companion object {
-        const val CONTROLLER_BLUETOOTH_NAME = "Game Volt gamepad"
+        const val CONTROLLER_BLUETOOTH_NAME = "Game Volt Gamepad"
         const val REPORT_ID: Int = 1
     }
 
@@ -235,7 +235,7 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
 
     /**
      * 1. Core Interface Method: registerGamepad
-     * Registers the Android device as a Bluetooth HID Gamepad ("Game Volt gamepad") via BluetoothHidDevice.
+     * Registers the Android device as a Bluetooth HID Gamepad ("Game Volt Gamepad") via BluetoothHidDevice.
      */
     @SuppressLint("MissingPermission")
     @PluginMethod

@@ -2,7 +2,7 @@ import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
   appId: 'com.gamevolt.gamepad',
-  appName: 'Game Volt gamepad',
+  appName: 'Game Volt Gamepad',
   webDir: 'dist',
   server: {
     androidScheme: 'https',

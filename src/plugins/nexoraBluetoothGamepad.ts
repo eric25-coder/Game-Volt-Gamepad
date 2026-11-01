@@ -95,7 +95,7 @@ class NexoraBluetoothGamepadWeb extends WebPlugin implements NexoraBluetoothGame
       permissionsGranted: false,
       hidRegistered: false,
       discoverable: false,
-      controllerName: 'Game Volt gamepad',
+      controllerName: 'Game Volt Gamepad',
       statusMessage:
         'Browser preview active. Install the generated Capacitor Android APK to use native BluetoothHidDevice.',
       limitationReason:
@@ -106,7 +106,7 @@ class NexoraBluetoothGamepadWeb extends WebPlugin implements NexoraBluetoothGame
   private getEmptyStatus(error: string | null = null): NexoraStatusPayload {
     return {
       bluetoothEnabled: false,
-      controllerBluetoothName: 'Game Volt gamepad',
+      controllerBluetoothName: 'Game Volt Gamepad',
       hidRegistered: false,
       discoverable: false,
       connectionState: 'DISCONNECTED',
@@ -141,7 +141,7 @@ class NexoraBluetoothGamepadWeb extends WebPlugin implements NexoraBluetoothGame
 
   async startPairing(): Promise<NexoraStatusPayload> {
     return this.getEmptyStatus(
-      'Bluetooth HID discoverability ("Game Volt gamepad") requires the installed Capacitor Android APK.'
+      'Bluetooth HID discoverability ("Game Volt Gamepad") requires the installed Capacitor Android APK.'
     );
   }
 

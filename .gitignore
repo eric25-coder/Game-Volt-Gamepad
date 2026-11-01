@@ -1,8 +1,28 @@
+# Dependencies
 node_modules/
-build/
+
+# Production build outputs
 dist/
 coverage/
+android/app/build/
+android/build/
+android/.gradle/
+android/local.properties
+*.apk
+*.aab
+
+# Always keep Gradle Wrapper files tracked in Git
+!android/gradlew
+!android/gradlew.bat
+!android/gradle/
+!android/gradle/wrapper/
+!android/gradle/wrapper/gradle-wrapper.jar
+!android/gradle/wrapper/gradle-wrapper.properties
+
+# Misc
 .DS_Store
 *.log
+
+# Env files
 .env*
 !.env.example

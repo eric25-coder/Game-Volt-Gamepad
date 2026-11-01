@@ -34,8 +34,8 @@ import kotlin.math.roundToInt
 /**
  * NexoraBluetoothGamepadPlugin
  *
- * Production Native Android BluetoothHidDevice Capacitor Plugin for Game Volt gamepad.
- * Registers the Android smartphone as a physical Bluetooth HID Game Controller ("Game Volt gamepad")
+ * Production Native Android BluetoothHidDevice Capacitor Plugin for Game Volt Gamepad.
+ * Registers the Android smartphone as a physical Bluetooth HID Game Controller ("Game Volt Gamepad")
  * using Android's BluetoothHidDevice system service (API 28+).
  */
 @CapacitorPlugin(
@@ -61,7 +61,7 @@ import kotlin.math.roundToInt
 class NexoraBluetoothGamepadPlugin : Plugin() {
 
     companion object {
-        const val CONTROLLER_BLUETOOTH_NAME = "Game Volt gamepad"
+        const val CONTROLLER_BLUETOOTH_NAME = "Game Volt Gamepad"
         const val REPORT_ID: Int = 1
     }
 
@@ -234,8 +234,8 @@ class NexoraBluetoothGamepadPlugin : Plugin() {
         val limitation: String? = when {
             !hasBluetoothHardware -> "This Android device does not have a Bluetooth hardware adapter."
             !supportedApi -> "Android 9.0 (API 28) or newer is required for BluetoothHidDevice. Detected API $sdkInt."
-            !isEnabled -> "Bluetooth is currently turned off. Enable Bluetooth to register Gamevolt GAMEPAD."
-            !permissionsGranted -> "Bluetooth permissions are required to register Gamevolt GAMEPAD."
+            !isEnabled -> "Bluetooth is currently turned off. Enable Bluetooth to register Game Volt Gamepad."
+            !permissionsGranted -> "Bluetooth permissions are required to register Game Volt Gamepad."
             else -> null
         }
 

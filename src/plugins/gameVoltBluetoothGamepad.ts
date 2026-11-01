@@ -57,7 +57,7 @@ export interface HidReportInputPayload {
  * called by the TypeScript frontend.
  */
 export interface GameVoltBluetoothGamepadPlugin {
-  /** Registers the Android device as a Bluetooth HID Gamepad ("Game Volt gamepad"). */
+  /** Registers the Android device as a Bluetooth HID Gamepad ("Game Volt Gamepad"). */
   registerGamepad(): Promise<GameVoltStatusPayload>;
   /** Transmits the 9-byte binary Bluetooth HID input report to the connected host. */
   sendHidReport(report: HidReportInputPayload): Promise<{ sent: boolean; reportHex: string }>;
@@ -79,325 +79,112 @@ export interface GameVoltBluetoothGamepadPlugin {
   ): Promise<PluginListenerHandle>;
 }
 
-const PAIRED_HOSTS_STORAGE_KEY = 'gamevolt_android_bt_paired_hosts_v1';
-
-interface WebBluetoothNavigator extends Navigator {
-  bluetooth?: {
-    getAvailability?: () => Promise<boolean>;
-    getDevices?: () => Promise<Array<{ id: string; name?: string; gatt?: { connected?: boolean; connect?: () => Promise<unknown>; disconnect?: () => void } }>>;
-    requestDevice?: (options: {
-      acceptAllDevices?: boolean;
-      optionalServices?: string[];
-    }) => Promise<{
-      id: string;
-      name?: string;
-      gatt?: {
-        connected?: boolean;
-        connect?: () => Promise<unknown>;
-        disconnect?: () => void;
-      };
-      addEventListener?: (type: string, listener: () => void) => void;
-    }>;
-  };
-}
-
 /**
- * Android WebView / Chrome Android bridge implementation when running outside
- * the native Kotlin APK binary. Uses Android Web Bluetooth APIs and Android Intents
- * while maintaining the exact same state machine as GameVoltBluetoothGamepadPlugin.kt.
+ * Web fallback implementation used ONLY when running inside a browser preview tab.
+ * When compiled and installed as an Android APK via Capacitor, Capacitor automatically
+ * routes all calls to the native Kotlin `GameVoltBluetoothGamepadPlugin` class.
  */
-class GameVoltBluetoothGamepadAndroidWeb extends WebPlugin implements GameVoltBluetoothGamepadPlugin {
-  private hidRegistered = true;
-  private discoverable = false;
-  private connectionState: 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'DISCONNECTING' =
-    'DISCONNECTED';
-  private connectedHost: PairedBluetoothHost | null = null;
-  private pairedDevices: PairedBluetoothHost[] = [];
-  private reportsSentCount = 0;
-  private lastReportHex = '00 00 08 00 00 00 00 00 00';
+class GameVoltBluetoothGamepadWeb extends WebPlugin implements GameVoltBluetoothGamepadPlugin {
+  private getBrowserCompatibility(): GameVoltCompatibilityResult {
+    const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
+    const androidMatch = ua.match(/Android\s+([0-9.]+)/i);
+    const androidRelease = androidMatch ? androidMatch[1] : 'N/A';
+    const majorVer = androidMatch ? parseInt(androidMatch[1], 10) : 0;
 
-  constructor() {
-    super();
-    this.loadStoredHosts();
-  }
-
-  private loadStoredHosts() {
-    try {
-      const raw = localStorage.getItem(PAIRED_HOSTS_STORAGE_KEY);
-      if (raw) {
-        this.pairedDevices = JSON.parse(raw) as PairedBluetoothHost[];
-      }
-    } catch {
-      this.pairedDevices = [];
-    }
-  }
-
-  private saveStoredHosts() {
-    try {
-      localStorage.setItem(PAIRED_HOSTS_STORAGE_KEY, JSON.stringify(this.pairedDevices));
-    } catch {
-      // Ignore storage error
-    }
-  }
-
-  private classifyHost(name: string): {
-    deviceType: string;
-    hidCompatible: boolean;
-    compatibilityNote: string;
-  } {
-    const upper = name.toUpperCase();
-    if (upper.includes('PS4') || upper.includes('PS5') || upper.includes('PLAYSTATION')) {
-      return {
-        deviceType: 'Console (Remote Play)',
-        hidCompatible: false,
-        compatibilityNote: 'Requires PS Remote Play or bridge.',
-      };
-    }
-    if (upper.includes('TV') || upper.includes('BRAVIA') || upper.includes('CHROMECAST') || upper.includes('SHIELD')) {
-      return {
-        deviceType: 'Android TV / Smart TV',
-        hidCompatible: true,
-        compatibilityNote: 'Compatible with Android TV & Google TV.',
-      };
-    }
     return {
-      deviceType: 'PC / Host',
-      hidCompatible: true,
-      compatibilityNote: 'Supports standard Bluetooth HID Gamepad.',
+      platform: 'web',
+      isNativeAndroidApk: false,
+      androidSdkInt: majorVer >= 9 ? 28 + (majorVer - 9) : 0,
+      androidRelease,
+      deviceModel: 'Browser Preview Environment',
+      bluetoothSupported: false,
+      bluetoothEnabled: false,
+      hidProfileSupported: false,
+      permissionsGranted: false,
+      hidRegistered: false,
+      discoverable: false,
+      controllerName: 'Game Volt Gamepad',
+      statusMessage:
+        'Browser preview active. Install the generated Capacitor Android APK to use native BluetoothHidDevice.',
+      limitationReason:
+        "Android's BluetoothHidDevice API is a native OS system service and cannot be registered from an ordinary web browser tab. Build and install the Android APK to activate native Bluetooth HID.",
     };
   }
 
-  private buildStatus(error: string | null = null): GameVoltStatusPayload {
+  private getEmptyStatus(error: string | null = null): GameVoltStatusPayload {
     return {
-      bluetoothEnabled: true,
-      controllerBluetoothName: 'Game Volt gamepad',
-      hidRegistered: this.hidRegistered,
-      discoverable: this.discoverable,
-      connectionState: this.connectionState,
-      connectedHost: this.connectedHost,
-      pairedDevices: this.pairedDevices,
-      lastReportHex: this.lastReportHex,
-      reportsSentCount: this.reportsSentCount,
+      bluetoothEnabled: false,
+      controllerBluetoothName: 'Game Volt Gamepad',
+      hidRegistered: false,
+      discoverable: false,
+      connectionState: 'DISCONNECTED',
+      connectedHost: null,
+      pairedDevices: [],
       error,
     };
   }
 
-  private emitStatus(error: string | null = null) {
-    this.notifyListeners('bluetoothHidStatusChanged', this.buildStatus(error));
-  }
-
   async checkCompatibility(): Promise<GameVoltCompatibilityResult> {
-    const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
-    const androidMatch = ua.match(/Android\s+([0-9.]+)/i);
-    const androidRelease = androidMatch ? androidMatch[1] : '14';
-    const majorVer = androidMatch ? parseInt(androidMatch[1], 10) : 14;
-
-    return {
-      platform: 'android',
-      isNativeAndroidApk: true,
-      androidSdkInt: majorVer >= 9 ? 28 + (majorVer - 9) : 34,
-      androidRelease,
-      deviceModel: 'Android Gamepad Device',
-      bluetoothSupported: true,
-      bluetoothEnabled: true,
-      hidProfileSupported: true,
-      permissionsGranted: true,
-      hidRegistered: this.hidRegistered,
-      discoverable: this.discoverable,
-      controllerName: 'Game Volt gamepad',
-      statusMessage: 'Android Bluetooth HID Gamepad active.',
-      limitationReason: null,
-    };
+    return this.getBrowserCompatibility();
   }
 
   async requestBluetoothPermissions(): Promise<{
     granted: boolean;
     status: GameVoltStatusPayload;
   }> {
-    this.hidRegistered = true;
     return {
-      granted: true,
-      status: this.buildStatus(null),
+      granted: false,
+      status: this.getEmptyStatus(
+        'Native Android APK required to request BLUETOOTH_CONNECT, BLUETOOTH_SCAN, and BLUETOOTH_ADVERTISE permissions.'
+      ),
     };
   }
 
   async registerGamepad(): Promise<GameVoltStatusPayload> {
-    this.hidRegistered = true;
-    const status = this.buildStatus(null);
-    this.emitStatus(null);
-    return status;
+    return this.getEmptyStatus(
+      "Android's BluetoothHidDevice API requires the compiled Capacitor Android APK (GameVoltBluetoothGamepadPlugin.kt)."
+    );
   }
 
   async startPairing(): Promise<GameVoltStatusPayload> {
-    this.hidRegistered = true;
-    this.discoverable = true;
-    this.emitStatus(null);
-
-    const nav = typeof navigator !== 'undefined' ? (navigator as WebBluetoothNavigator) : undefined;
-    if (nav?.bluetooth?.requestDevice) {
-      try {
-        this.connectionState = 'CONNECTING';
-        this.emitStatus(null);
-
-        const device = await nav.bluetooth.requestDevice({
-          acceptAllDevices: true,
-          optionalServices: [
-            '00001812-0000-1000-8000-00805f9b34fb',
-            'battery_service',
-            'device_information',
-          ],
-        });
-
-        const hostName = device.name || `Bluetooth Host (${device.id.slice(0, 6)})`;
-        const { deviceType, hidCompatible, compatibilityNote } = this.classifyHost(hostName);
-        const macLike =
-          device.id.includes(':')
-            ? device.id
-            : device.id
-                .replace(/[^a-fA-F0-9]/g, '')
-                .padEnd(12, '0')
-                .slice(0, 12)
-                .match(/.{1,2}/g)!
-                .join(':')
-                .toUpperCase();
-
-        if (device.gatt?.connect) {
-          try {
-            await device.gatt.connect();
-          } catch {
-            // Host may use classic HID channel rather than GATT server
-          }
-        }
-
-        const newHost: PairedBluetoothHost = {
-          name: hostName,
-          address: macLike,
-          deviceType,
-          isConnected: true,
-          hidCompatible,
-          compatibilityNote,
-        };
-
-        this.connectedHost = newHost;
-        this.connectionState = 'CONNECTED';
-        this.pairedDevices = [
-          newHost,
-          ...this.pairedDevices
-            .filter((d) => d.address !== newHost.address)
-            .map((d) => ({ ...d, isConnected: false })),
-        ];
-        this.saveStoredHosts();
-
-        device.addEventListener?.('gattserverdisconnected', () => {
-          if (this.connectedHost?.address === newHost.address) {
-            this.connectedHost = null;
-            this.connectionState = 'DISCONNECTED';
-            this.pairedDevices = this.pairedDevices.map((d) => ({ ...d, isConnected: false }));
-            this.emitStatus(null);
-          }
-        });
-
-        this.emitStatus(null);
-        return this.buildStatus(null);
-      } catch (err) {
-        this.connectionState = this.connectedHost ? 'CONNECTED' : 'DISCONNECTED';
-        const msg = err instanceof Error ? err.message : String(err);
-        if (!msg.toLowerCase().includes('cancel') && !msg.toLowerCase().includes('user')) {
-          return this.buildStatus(msg);
-        }
-        return this.buildStatus(null);
-      }
-    }
-
-    return this.buildStatus(null);
+    return this.getEmptyStatus(
+      'Bluetooth HID discoverability ("Game Volt Gamepad") requires the installed Capacitor Android APK.'
+    );
   }
 
   async openBluetoothSettings(): Promise<void> {
-    if (typeof window !== 'undefined') {
-      const ua = navigator.userAgent || '';
-      if (/Android/i.test(ua)) {
-        window.location.href = 'intent:#Intent;action=android.settings.BLUETOOTH_SETTINGS;end';
-        return;
-      }
-    }
-    await this.startPairing();
+    throw new Error('Opening Android system Bluetooth settings requires the native Android APK.');
   }
 
   async getPairedDevices(): Promise<GameVoltStatusPayload> {
-    const nav = typeof navigator !== 'undefined' ? (navigator as WebBluetoothNavigator) : undefined;
-    if (nav?.bluetooth?.getDevices) {
-      try {
-        const devices = await nav.bluetooth.getDevices();
-        devices.forEach((dev) => {
-          const hostName = dev.name || `Bluetooth Host (${dev.id.slice(0, 6)})`;
-          const { deviceType, hidCompatible, compatibilityNote } = this.classifyHost(hostName);
-          const exists = this.pairedDevices.some((p) => p.name === hostName);
-          if (!exists) {
-            this.pairedDevices.push({
-              name: hostName,
-              address: dev.id.slice(0, 17).toUpperCase(),
-              deviceType,
-              isConnected: Boolean(dev.gatt?.connected),
-              hidCompatible,
-              compatibilityNote,
-            });
-          }
-        });
-        this.saveStoredHosts();
-      } catch {
-        // Ignore getDevices error
-      }
-    }
-    this.emitStatus(null);
-    return this.buildStatus(null);
+    return this.getEmptyStatus(
+      'Reading bonded Android Bluetooth HID hosts requires the installed Capacitor Android APK.'
+    );
   }
 
-  async connectHost(options: { address: string }): Promise<GameVoltStatusPayload> {
-    const found = this.pairedDevices.find((d) => d.address === options.address);
-    if (!found) {
-      return this.buildStatus('Host not found in paired list.');
-    }
-    this.connectionState = 'CONNECTED';
-    const connected: PairedBluetoothHost = { ...found, isConnected: true };
-    this.connectedHost = connected;
-    this.pairedDevices = this.pairedDevices.map((d) => ({
-      ...d,
-      isConnected: d.address === options.address,
-    }));
-    this.saveStoredHosts();
-    this.emitStatus(null);
-    return this.buildStatus(null);
+  async connectHost(): Promise<GameVoltStatusPayload> {
+    return this.getEmptyStatus(
+      'Connecting via BluetoothHidDevice requires the installed Android APK.'
+    );
   }
 
   async reconnectLastHost(): Promise<GameVoltStatusPayload> {
-    if (this.pairedDevices.length === 0) {
-      return this.startPairing();
-    }
-    return this.connectHost({ address: this.pairedDevices[0].address });
+    return this.getEmptyStatus(
+      'Reconnecting via BluetoothHidDevice requires the installed Android APK.'
+    );
   }
 
   async disconnect(): Promise<GameVoltStatusPayload> {
-    this.lastReportHex = '00 00 08 00 00 00 00 00 00';
-    this.connectedHost = null;
-    this.connectionState = 'DISCONNECTED';
-    this.pairedDevices = this.pairedDevices.map((d) => ({ ...d, isConnected: false }));
-    this.saveStoredHosts();
-    this.emitStatus(null);
-    return this.buildStatus(null);
+    return this.getEmptyStatus();
   }
 
-  async forgetDevice(options: { address: string }): Promise<GameVoltStatusPayload> {
-    if (this.connectedHost?.address === options.address) {
-      this.connectedHost = null;
-      this.connectionState = 'DISCONNECTED';
-    }
-    this.pairedDevices = this.pairedDevices.filter((d) => d.address !== options.address);
-    this.saveStoredHosts();
-    this.emitStatus(null);
-    return this.buildStatus(null);
+  async forgetDevice(): Promise<GameVoltStatusPayload> {
+    return this.getEmptyStatus();
   }
 
-  async sendHidReport(report: HidReportInputPayload): Promise<{ sent: boolean; reportHex: string }> {
+  async sendHidReport(
+    report: HidReportInputPayload
+  ): Promise<{ sent: boolean; reportHex: string }> {
     const lx = Math.max(-127, Math.min(127, Math.round(report.leftX * 127))) & 0xff;
     const ly = Math.max(-127, Math.min(127, Math.round(report.leftY * 127))) & 0xff;
     const rx = Math.max(-127, Math.min(127, Math.round(report.rightX * 127))) & 0xff;
@@ -416,25 +203,19 @@ class GameVoltBluetoothGamepadAndroidWeb extends WebPlugin implements GameVoltBl
       lt,
       rt,
     ];
-    this.lastReportHex = bytes.map((b) => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
-
-    if (this.connectionState === 'CONNECTED' && this.connectedHost) {
-      this.reportsSentCount += 1;
-      return { sent: true, reportHex: this.lastReportHex };
-    }
-    return { sent: false, reportHex: this.lastReportHex };
+    const reportHex = bytes.map((b) => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+    return { sent: false, reportHex };
   }
 
   async releaseAllInputs(): Promise<{ sent: boolean }> {
-    this.lastReportHex = '00 00 08 00 00 00 00 00 00';
-    return { sent: this.connectionState === 'CONNECTED' };
+    return { sent: false };
   }
 }
 
 export const GameVoltBluetoothGamepad = registerPlugin<GameVoltBluetoothGamepadPlugin>(
   'GameVoltBluetoothGamepad',
   {
-    web: () => new GameVoltBluetoothGamepadAndroidWeb(),
+    web: () => new GameVoltBluetoothGamepadWeb(),
   }
 );
 
