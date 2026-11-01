@@ -27,18 +27,26 @@ export const Joystick: React.FC<JoystickProps> = ({
   onMove,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const cachedRectRef = useRef<DOMRect | null>(null);
   const activePointerId = useRef<number | null>(null);
   const [pos, setPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isActive, setIsActive] = useState(false);
   const hitBoundaryRef = useRef(false);
 
   const applyDeadzoneAndSensitivity = (rawX: number, rawY: number) => {
-    const mag = Math.sqrt(rawX * rawX + rawY * rawY);
-    if (mag < deadzone) {
+    const mag = Math.hypot(rawX, rawY);
+    const effectiveDeadzone = Math.max(0, Math.min(0.35, deadzone));
+    if (mag <= effectiveDeadzone) {
       return { x: 0, y: 0 };
     }
-    const normalizedMag = Math.min(1, (mag - deadzone) / (1 - deadzone));
-    const curvedMag = Math.min(1, Math.pow(normalizedMag, 1 / Math.max(0.5, sensitivity)));
+    const effectiveSensitivity = Math.max(0.5, sensitivity);
+    const normalizedMag = Math.min(
+      1,
+      (mag - effectiveDeadzone) / Math.max(0.01, 1 - effectiveDeadzone)
+    );
+    // High-gain response curve: boosts micro-movements near center immediately
+    const curveExponent = 1 / Math.max(0.5, effectiveSensitivity * 0.95);
+    const curvedMag = Math.min(1, Math.pow(normalizedMag, curveExponent));
     const angle = Math.atan2(rawY, rawX);
     return {
       x: Math.cos(angle) * curvedMag,
@@ -47,12 +55,16 @@ export const Joystick: React.FC<JoystickProps> = ({
   };
 
   const updateFromClientXY = (clientX: number, clientY: number) => {
-    const rect = containerRef.current?.getBoundingClientRect();
+    const rect = cachedRectRef.current ?? containerRef.current?.getBoundingClientRect();
     if (!rect) return;
 
     const centerX = rect.left + rect.width / 2;
     const centerY = rect.top + rect.height / 2;
-    const maxRadius = Math.min(rect.width, rect.height) * 0.38;
+
+    // Short physical throw radius scaled by sensitivity so slight thumb tilts reach 100% deflection fast
+    const effectiveSensitivity = Math.max(0.5, sensitivity);
+    const baseRadius = Math.min(rect.width, rect.height) * 0.21;
+    const maxRadius = Math.max(8, baseRadius / Math.pow(effectiveSensitivity, 0.72));
 
     const screenDX = clientX - centerX;
     const screenDY = clientY - centerY;
@@ -61,7 +73,7 @@ export const Joystick: React.FC<JoystickProps> = ({
     let dx = (isRotated90 ? screenDY : screenDX) / maxRadius;
     let dy = (isRotated90 ? -screenDX : screenDY) / maxRadius;
 
-    const dist = Math.sqrt(dx * dx + dy * dy);
+    const dist = Math.hypot(dx, dy);
     if (dist > 1) {
       dx /= dist;
       dy /= dist;
@@ -73,15 +85,17 @@ export const Joystick: React.FC<JoystickProps> = ({
       hitBoundaryRef.current = false;
     }
 
-    setPos({ x: dx, y: dy });
     const processed = applyDeadzoneAndSensitivity(dx, dy);
+    // Dispatch native HID / socket input first before triggering React visual state update
     onMove(processed.x, processed.y);
+    setPos({ x: processed.x, y: processed.y });
   };
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.stopPropagation();
     e.currentTarget.setPointerCapture(e.pointerId);
     activePointerId.current = e.pointerId;
+    cachedRectRef.current = e.currentTarget.getBoundingClientRect();
     setIsActive(true);
     if (hapticsEnabled && navigator.vibrate) navigator.vibrate(10);
     updateFromClientXY(e.clientX, e.clientY);
@@ -89,16 +103,18 @@ export const Joystick: React.FC<JoystickProps> = ({
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     if (activePointerId.current !== e.pointerId) return;
+    // Process latest pointer position immediately with zero layout reflow
     updateFromClientXY(e.clientX, e.clientY);
   };
 
   const handlePointerUpOrCancel = (e: React.PointerEvent<HTMLDivElement>) => {
     if (activePointerId.current !== e.pointerId) return;
     activePointerId.current = null;
+    cachedRectRef.current = null;
     setIsActive(false);
     hitBoundaryRef.current = false;
-    setPos({ x: 0, y: 0 });
     onMove(0, 0);
+    setPos({ x: 0, y: 0 });
   };
 
   const ringColor = rgbMode === 'static' ? customColor : '#ff007f';
@@ -152,10 +168,10 @@ export const Joystick: React.FC<JoystickProps> = ({
       <div
         className="w-[76%] h-[76%] rounded-full pointer-events-none relative flex items-center justify-center"
         style={{
-          left: `${pos.x * 22}%`,
-          top: `${pos.y * 22}%`,
+          left: `${pos.x * 24}%`,
+          top: `${pos.y * 24}%`,
           transform: `scale(${isActive ? 1.05 : 1})`,
-          transition: isActive ? 'none' : 'left 130ms cubic-bezier(0.16,1,0.3,1), top 130ms cubic-bezier(0.16,1,0.3,1), transform 130ms ease',
+          transition: isActive ? 'none' : 'left 90ms cubic-bezier(0.16,1,0.3,1), top 90ms cubic-bezier(0.16,1,0.3,1), transform 90ms ease',
           background:
             'radial-gradient(circle at 38% 30%, #484b52 0%, #2a2c32 45%, #17191d 85%, #0d0e11 100%)',
           boxShadow: isActive

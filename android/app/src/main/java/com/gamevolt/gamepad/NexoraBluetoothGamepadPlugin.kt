@@ -117,6 +117,8 @@ class NexoraBluetoothGamepadPlugin : Plugin() {
         0x75.toByte(), 0x04.toByte(),       //   Report Size (4 bits)
         0x95.toByte(), 0x01.toByte(),       //   Report Count (1)
         0x81.toByte(), 0x42.toByte(),       //   Input (Data,Var,Abs,Null)
+        0x65.toByte(), 0x00.toByte(),       //   Unit (None)
+        0x45.toByte(), 0x00.toByte(),       //   Physical Maximum (0)
         0x75.toByte(), 0x04.toByte(),       //   Report Size (4 bits padding)
         0x95.toByte(), 0x01.toByte(),       //   Report Count (1)
         0x81.toByte(), 0x01.toByte(),       //   Input (Const,Array,Abs)
@@ -146,51 +148,10 @@ class NexoraBluetoothGamepadPlugin : Plugin() {
         0xC0.toByte()                       // End Collection
     )
 
-    private val bluetoothReceiver = object : BroadcastReceiver() {
-        @SuppressLint("MissingPermission")
-        override fun onReceive(context: Context?, intent: Intent?) {
-            when (intent?.action) {
-                BluetoothAdapter.ACTION_STATE_CHANGED -> {
-                    val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
-                    if (state == BluetoothAdapter.STATE_OFF || state == BluetoothAdapter.STATE_TURNING_OFF) {
-                        isHidRegistered = false
-                        connectedHost = null
-                        connectionStateStr = "DISCONNECTED"
-                        emitStatusUpdate("Bluetooth adapter turned off.")
-                    } else if (state == BluetoothAdapter.STATE_ON) {
-                        emitStatusUpdate(null)
-                    }
-                }
-                BluetoothAdapter.ACTION_SCAN_MODE_CHANGED -> {
-                    val scanMode = intent.getIntExtra(
-                        BluetoothAdapter.EXTRA_SCAN_MODE,
-                        BluetoothAdapter.SCAN_MODE_NONE
-                    )
-                    isDiscoverable = scanMode == BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE
-                    emitStatusUpdate(null)
-                }
-                BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
-                    emitStatusUpdate(null)
-                }
-            }
-        }
-    }
-
     override fun load() {
         super.load()
         bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
         bluetoothAdapter = bluetoothManager?.adapter
-
-        val filter = IntentFilter().apply {
-            addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
-            addAction(BluetoothAdapter.ACTION_SCAN_MODE_CHANGED)
-            addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(bluetoothReceiver, filter, Context.RECEIVER_EXPORTED)
-        } else {
-            context.registerReceiver(bluetoothReceiver, filter)
-        }
     }
 
     override fun handleOnDestroy() {
@@ -198,7 +159,6 @@ class NexoraBluetoothGamepadPlugin : Plugin() {
             sendFailsafeZeroReportInternal()
             hidDevice?.unregisterApp()
             bluetoothAdapter?.closeProfileProxy(BluetoothProfile.HID_DEVICE, hidDevice)
-            context.unregisterReceiver(bluetoothReceiver)
         } catch (_: Exception) {
         }
         super.handleOnDestroy()

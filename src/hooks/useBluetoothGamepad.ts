@@ -7,6 +7,7 @@ import {
   HostPlatformId,
 } from '../nativeBridgeCode';
 import {
+  DiagnosticTestResult,
   GameVoltBluetoothGamepad,
   GameVoltCompatibilityResult,
   GameVoltStatusPayload,
@@ -14,11 +15,14 @@ import {
 } from '../plugins/gameVoltBluetoothGamepad';
 import { ControllerState } from '../types';
 
-export type { PairedBluetoothHost };
+export type { PairedBluetoothHost, DiagnosticTestResult };
 export type NexoraCompatibilityResult = GameVoltCompatibilityResult;
 
 export type BluetoothConnectionStatus =
   | 'DISCONNECTED'
+  | 'DISCOVERABLE'
+  | 'PAIRING'
+  | 'BONDED'
   | 'CONNECTING'
   | 'CONNECTED_NATIVE_HID';
 
@@ -63,14 +67,21 @@ export function useBluetoothGamepad() {
     null
   );
   const [adapterStatus, setAdapterStatus] = useState<BluetoothAdapterStatus>('DISABLED');
+  const [hidProfileAvailable, setHidProfileAvailable] = useState<boolean>(false);
   const [hidRegistrationStatus, setHidRegistrationStatus] =
     useState<HidRegistrationStatus>('NOT_REGISTERED');
+  const [registrationCallbackMessage, setRegistrationCallbackMessage] =
+    useState<string>('Not called yet');
   const [isDiscoverable, setIsDiscoverable] = useState<boolean>(false);
+  const [pairingStatus, setPairingStatus] = useState<'NONE' | 'PAIRING' | 'BONDED'>('NONE');
+  const [hostDeviceAddress, setHostDeviceAddress] = useState<string>('None');
   const [btStatus, setBtStatus] = useState<BluetoothConnectionStatus>('DISCONNECTED');
   const [btDeviceName, setBtDeviceName] = useState<string>('No Host Connected');
   const [connectedHost, setConnectedHost] = useState<PairedBluetoothHost | null>(null);
   const [pairedHosts, setPairedHosts] = useState<PairedBluetoothHost[]>([]);
   const [btError, setBtError] = useState<string | null>(null);
+  const [callbackLogs, setCallbackLogs] = useState<string[]>([]);
+  const [diagnosticResult, setDiagnosticResult] = useState<DiagnosticTestResult | null>(null);
   const [btReportsSent, setBtReportsSent] = useState<number>(0);
   const [selectedHostPlatform, setSelectedHostPlatform] = useState<HostPlatformId>('windows_11');
   const [lastHidReport, setLastHidReport] = useState<EncodedHidReport>(() =>
@@ -83,8 +94,21 @@ export function useBluetoothGamepad() {
 
   const applyNativeStatusPayload = useCallback((payload: GameVoltStatusPayload) => {
     setAdapterStatus(payload.bluetoothEnabled ? 'ENABLED' : 'DISABLED');
+    setHidProfileAvailable(Boolean(payload.hidProfileAvailable ?? payload.hidRegistered));
     setHidRegistrationStatus(payload.hidRegistered ? 'REGISTERED' : 'NOT_REGISTERED');
+    if (payload.registrationCallbackMessage) {
+      setRegistrationCallbackMessage(payload.registrationCallbackMessage);
+    }
     setIsDiscoverable(Boolean(payload.discoverable));
+    if (payload.pairingStatus) {
+      setPairingStatus(payload.pairingStatus);
+    }
+    if (payload.hostDeviceAddress) {
+      setHostDeviceAddress(payload.hostDeviceAddress);
+    }
+    if (payload.callbackLogs) {
+      setCallbackLogs(payload.callbackLogs);
+    }
 
     if (payload.connectionState === 'CONNECTED' && payload.connectedHost) {
       setBtStatus('CONNECTED_NATIVE_HID');
@@ -92,6 +116,16 @@ export function useBluetoothGamepad() {
       setBtDeviceName(payload.connectedHost.name || payload.connectedHost.address);
     } else if (payload.connectionState === 'CONNECTING') {
       setBtStatus('CONNECTING');
+    } else if (payload.connectionState === 'PAIRING') {
+      setBtStatus('PAIRING');
+    } else if (payload.connectionState === 'BONDED') {
+      setBtStatus('BONDED');
+      setConnectedHost(null);
+      setBtDeviceName('Bonded (Tap Connect)');
+    } else if (payload.connectionState === 'DISCOVERABLE') {
+      setBtStatus('DISCOVERABLE');
+      setConnectedHost(null);
+      setBtDeviceName('Visible in Bluetooth Scan');
     } else {
       setBtStatus('DISCONNECTED');
       setConnectedHost(null);
@@ -104,9 +138,7 @@ export function useBluetoothGamepad() {
     if (typeof payload.reportsSentCount === 'number') {
       setBtReportsSent(payload.reportsSentCount);
     }
-    if (payload.error) {
-      setBtError(payload.error);
-    }
+    setBtError(payload.error);
   }, []);
 
   /**
@@ -121,6 +153,7 @@ export function useBluetoothGamepad() {
         const comp = await GameVoltBluetoothGamepad.checkCompatibility();
         if (!isMounted) return;
         setCompatibilityInfo(comp);
+        setHidProfileAvailable(comp.hidProfileSupported);
 
         if (!comp.hidProfileSupported) {
           setHidRegistrationStatus('UNSUPPORTED_ANDROID_VERSION');
@@ -180,7 +213,7 @@ export function useBluetoothGamepad() {
   }, [applyNativeStatusPayload]);
 
   /**
-   * 2. Starts Bluetooth pairing as "Game Volt Gamepad"
+   * 2. Starts Bluetooth pairing as "Game Volt Gamepad" (ensures HID is registered first)
    */
   const startBluetoothPairing = useCallback(async () => {
     setBtError(null);
@@ -188,6 +221,9 @@ export function useBluetoothGamepad() {
       if (hidRegistrationStatus !== 'REGISTERED') {
         const regStatus = await GameVoltBluetoothGamepad.registerGamepad();
         applyNativeStatusPayload(regStatus);
+        if (!regStatus.hidRegistered) {
+          return;
+        }
       }
       const status = await GameVoltBluetoothGamepad.startPairing({ durationSeconds: 300 });
       applyNativeStatusPayload(status);
@@ -360,6 +396,19 @@ export function useBluetoothGamepad() {
     setBtDeviceName('No Host Connected');
   }, [sendBluetoothFailsafeRelease, applyNativeStatusPayload]);
 
+  /**
+   * 11. Runs the 6-step native Bluetooth HID diagnostic test
+   */
+  const runBluetoothDiagnosticTest = useCallback(async () => {
+    try {
+      const result = await GameVoltBluetoothGamepad.runDiagnosticTest();
+      setDiagnosticResult(result);
+      applyNativeStatusPayload(result.status);
+    } catch (err) {
+      setBtError(err instanceof Error ? err.message : String(err));
+    }
+  }, [applyNativeStatusPayload]);
+
   const activeHostCompatibility =
     HOST_COMPATIBILITY_PROFILES.find((p) => p.id === selectedHostPlatform) ??
     HOST_COMPATIBILITY_PROFILES[0];
@@ -367,13 +416,19 @@ export function useBluetoothGamepad() {
   return {
     compatibilityInfo,
     adapterStatus,
+    hidProfileAvailable,
     hidRegistrationStatus,
+    registrationCallbackMessage,
     isDiscoverable,
+    pairingStatus,
+    hostDeviceAddress,
     btStatus,
     btDeviceName,
     connectedHost,
     pairedHosts,
     btError,
+    callbackLogs,
+    diagnosticResult,
     btReportsSent,
     lastHidReport,
     bridgeInfo,
@@ -390,5 +445,6 @@ export function useBluetoothGamepad() {
     sendBluetoothGamepadState,
     sendBluetoothFailsafeRelease,
     disconnectBluetooth,
+    runBluetoothDiagnosticTest,
   };
 }

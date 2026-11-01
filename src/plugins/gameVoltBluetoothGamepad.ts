@@ -27,17 +27,44 @@ export interface GameVoltCompatibilityResult {
   limitationReason: string | null;
 }
 
+export type NativeBluetoothConnectionState =
+  | 'DISCONNECTED'
+  | 'DISCOVERABLE'
+  | 'PAIRING'
+  | 'BONDED'
+  | 'CONNECTING'
+  | 'CONNECTED'
+  | 'DISCONNECTING';
+
 export interface GameVoltStatusPayload {
   bluetoothEnabled: boolean;
+  hidProfileAvailable?: boolean;
   controllerBluetoothName: string;
   hidRegistered: boolean;
+  registrationCallbackMessage?: string;
   discoverable: boolean;
-  connectionState: 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'DISCONNECTING';
+  pairingStatus?: 'NONE' | 'PAIRING' | 'BONDED';
+  hostDeviceAddress?: string;
+  connectionState: NativeBluetoothConnectionState;
   connectedHost: PairedBluetoothHost | null;
   pairedDevices: PairedBluetoothHost[];
   lastReportHex?: string;
   reportsSentCount?: number;
   error: string | null;
+  callbackLogs?: string[];
+}
+
+export interface DiagnosticTestStep {
+  step: string;
+  passed: boolean;
+  detail: string;
+}
+
+export interface DiagnosticTestResult {
+  allPassed: boolean;
+  readyForPairing: boolean;
+  steps: DiagnosticTestStep[];
+  status: GameVoltStatusPayload;
 }
 
 export interface HidReportInputPayload {
@@ -53,15 +80,10 @@ export interface HidReportInputPayload {
 
 /**
  * GameVoltBluetoothGamepad Capacitor Plugin Interface
- * Defines the core methods `registerGamepad`, `sendHidReport`, and `disconnect`
- * called by the TypeScript frontend.
  */
 export interface GameVoltBluetoothGamepadPlugin {
-  /** Registers the Android device as a Bluetooth HID Gamepad ("Game Volt Gamepad"). */
   registerGamepad(): Promise<GameVoltStatusPayload>;
-  /** Transmits the 9-byte binary Bluetooth HID input report to the connected host. */
   sendHidReport(report: HidReportInputPayload): Promise<{ sent: boolean; reportHex: string }>;
-  /** Releases all held buttons/axes and disconnects from the connected Bluetooth HID host. */
   disconnect(): Promise<GameVoltStatusPayload>;
 
   checkCompatibility(): Promise<GameVoltCompatibilityResult>;
@@ -73,6 +95,7 @@ export interface GameVoltBluetoothGamepadPlugin {
   reconnectLastHost(): Promise<GameVoltStatusPayload>;
   forgetDevice(options: { address: string }): Promise<GameVoltStatusPayload>;
   releaseAllInputs(): Promise<{ sent: boolean }>;
+  runDiagnosticTest(): Promise<DiagnosticTestResult>;
   addListener(
     eventName: 'bluetoothHidStatusChanged',
     listenerFunc: (status: GameVoltStatusPayload) => void
@@ -114,13 +137,20 @@ class GameVoltBluetoothGamepadWeb extends WebPlugin implements GameVoltBluetooth
   private getEmptyStatus(error: string | null = null): GameVoltStatusPayload {
     return {
       bluetoothEnabled: false,
+      hidProfileAvailable: false,
       controllerBluetoothName: 'Game Volt Gamepad',
       hidRegistered: false,
+      registrationCallbackMessage: 'Browser preview (requires native Android APK)',
       discoverable: false,
+      pairingStatus: 'NONE',
+      hostDeviceAddress: 'None',
       connectionState: 'DISCONNECTED',
       connectedHost: null,
       pairedDevices: [],
       error,
+      callbackLogs: [
+        '[Browser Preview] Native BluetoothHidDevice callbacks are only available inside the installed Android APK.',
+      ],
     };
   }
 
@@ -209,6 +239,24 @@ class GameVoltBluetoothGamepadWeb extends WebPlugin implements GameVoltBluetooth
 
   async releaseAllInputs(): Promise<{ sent: boolean }> {
     return { sent: false };
+  }
+
+  async runDiagnosticTest(): Promise<DiagnosticTestResult> {
+    return {
+      allPassed: false,
+      readyForPairing: false,
+      steps: [
+        {
+          step: '1. Native Android APK Environment',
+          passed: false,
+          detail:
+            'Running in web browser preview. Install the compiled Android APK to run native BluetoothHidDevice diagnostics.',
+        },
+      ],
+      status: this.getEmptyStatus(
+        'Install the Android APK to run the native Bluetooth HID hardware diagnostic test.'
+      ),
+    };
   }
 }
 

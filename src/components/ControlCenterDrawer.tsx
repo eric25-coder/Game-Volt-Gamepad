@@ -40,6 +40,7 @@ import {
 import {
   BluetoothAdapterStatus,
   BluetoothConnectionStatus,
+  DiagnosticTestResult,
   HidRegistrationStatus,
   NexoraCompatibilityResult,
   PairedBluetoothHost,
@@ -84,11 +85,17 @@ interface ControlCenterDrawerProps {
   onDisconnect: () => void;
   compatibilityInfo: NexoraCompatibilityResult | null;
   adapterStatus: BluetoothAdapterStatus;
+  hidProfileAvailable: boolean;
   hidRegistrationStatus: HidRegistrationStatus;
+  registrationCallbackMessage: string;
   isDiscoverable: boolean;
+  pairingStatus: 'NONE' | 'PAIRING' | 'BONDED';
+  hostDeviceAddress: string;
   btStatus: BluetoothConnectionStatus;
   btDeviceName: string;
   btError: string | null;
+  callbackLogs: string[];
+  diagnosticResult: DiagnosticTestResult | null;
   pairedHosts: PairedBluetoothHost[];
   btReportsSent: number;
   lastHidReport: EncodedHidReport;
@@ -103,6 +110,7 @@ interface ControlCenterDrawerProps {
   onReconnectLastHost: () => void;
   onForgetBluetoothHost: (address: string) => void;
   onDisconnectBluetooth: () => void;
+  onRunBluetoothDiagnosticTest: () => void;
   controllerState: ControllerState;
   remoteReceivedState: ControllerState;
   lastPacketJson: string;
@@ -144,15 +152,23 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
   onConnect,
   onDisconnect,
   adapterStatus,
+  hidProfileAvailable,
   hidRegistrationStatus,
+  registrationCallbackMessage,
   isDiscoverable,
+  pairingStatus,
+  hostDeviceAddress,
   btStatus,
   btDeviceName,
   btError,
+  callbackLogs,
+  diagnosticResult,
   pairedHosts,
+  btReportsSent,
   lastHidReport,
   selectedHostPlatform,
   onSelectHostPlatform,
+  activeHostCompatibility,
   onRegisterNativeHid,
   onStartBluetoothPairing,
   onOpenBluetoothSettings,
@@ -161,6 +177,7 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
   onReconnectLastHost,
   onForgetBluetoothHost,
   onDisconnectBluetooth,
+  onRunBluetoothDiagnosticTest,
   controllerState,
   remoteReceivedState,
   onToggleLiveTestHud,
@@ -174,6 +191,7 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
 }) => {
   const [copiedLink, setCopiedLink] = useState(false);
   const [newProfileName, setNewProfileName] = useState('');
+  const [showBtDiagnostics, setShowBtDiagnostics] = useState(true);
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
 
   if (activeTab === 'none') return null;
@@ -224,6 +242,12 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
         {/* Top Navigation Header */}
         <div className="flex items-center justify-between gap-3 px-4 py-3 bg-[#11131a] border-b border-zinc-800/80 shrink-0">
           <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
+            <img
+              src="/gamepad-icon-192.png"
+              alt="Game Volt Gamepad"
+              referrerPolicy="no-referrer"
+              className="w-7 h-7 rounded-lg border border-pink-500/40 shrink-0"
+            />
             {[
               { id: 'connect', label: 'Connect', icon: Bluetooth },
               { id: 'test', label: 'Controller Test', icon: Activity },
@@ -277,8 +301,10 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
                     className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-bold font-mono-tabular ${
                       btStatus === 'CONNECTED_NATIVE_HID'
                         ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
-                        : btStatus === 'CONNECTING'
+                        : btStatus === 'CONNECTING' || btStatus === 'PAIRING'
                         ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                        : btStatus === 'BONDED' || btStatus === 'DISCOVERABLE'
+                        ? 'bg-blue-500/20 text-blue-300 border border-blue-500/40'
                         : 'bg-zinc-800 text-zinc-300 border border-zinc-700'
                     }`}
                   >
@@ -286,8 +312,10 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
                       className={`w-2 h-2 rounded-full ${
                         btStatus === 'CONNECTED_NATIVE_HID'
                           ? 'bg-emerald-400'
-                          : btStatus === 'CONNECTING'
+                          : btStatus === 'CONNECTING' || btStatus === 'PAIRING'
                           ? 'bg-amber-400 animate-ping'
+                          : btStatus === 'BONDED' || btStatus === 'DISCOVERABLE'
+                          ? 'bg-blue-400'
                           : 'bg-zinc-500'
                       }`}
                     />
@@ -318,13 +346,17 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
                     </div>
                   </div>
                   <div className="p-2.5 rounded-lg bg-[#090a0f] border border-zinc-800">
-                    <div className="text-[10px] uppercase text-zinc-400 font-bold">Visibility</div>
+                    <div className="text-[10px] uppercase text-zinc-400 font-bold">Bond / Advertising</div>
                     <div
                       className={`text-xs font-bold font-mono-tabular mt-0.5 ${
-                        isDiscoverable ? 'text-pink-400' : 'text-zinc-400'
+                        pairingStatus === 'BONDED'
+                          ? 'text-emerald-400'
+                          : isDiscoverable
+                          ? 'text-pink-400'
+                          : 'text-zinc-400'
                       }`}
                     >
-                      {isDiscoverable ? 'DISCOVERABLE' : 'HIDDEN'}
+                      {pairingStatus} · {isDiscoverable ? 'DISCOVERABLE' : 'HIDDEN'}
                     </div>
                   </div>
                   <div className="p-2.5 rounded-lg bg-[#090a0f] border border-zinc-800">
@@ -353,6 +385,14 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
                       {plat.name}
                     </button>
                   ))}
+                </div>
+
+                {/* Host Pairing & Compatibility Guidance */}
+                <div className="p-2.5 rounded-lg bg-[#090a0f] border border-zinc-800/90 text-xs space-y-1">
+                  <div className="font-semibold text-blue-300">
+                    {activeHostCompatibility.name}: {activeHostCompatibility.pairingSteps}
+                  </div>
+                  <div className="text-zinc-400 text-[11px]">{activeHostCompatibility.notes}</div>
                 </div>
 
                 {btError && (
@@ -403,7 +443,7 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
                     Reconnect
                   </button>
 
-                  {btStatus === 'CONNECTED_NATIVE_HID' && (
+                  {(btStatus === 'CONNECTED_NATIVE_HID' || btStatus === 'CONNECTING') && (
                     <button
                       onClick={onDisconnectBluetooth}
                       className="px-3 py-2 rounded-lg bg-red-950/70 hover:bg-red-900 border border-red-500/40 text-red-200 text-xs font-semibold"
@@ -411,6 +451,14 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
                       Disconnect
                     </button>
                   )}
+
+                  <button
+                    onClick={onRunBluetoothDiagnosticTest}
+                    className="px-3 py-2 rounded-lg bg-purple-600/25 hover:bg-purple-600/40 border border-purple-500/50 text-purple-200 text-xs font-bold flex items-center gap-1.5"
+                  >
+                    <Activity className="w-3.5 h-3.5" />
+                    Run HID Diagnostic
+                  </button>
 
                   <button
                     onClick={() => {
@@ -435,13 +483,17 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
                         <div className="min-w-0 pr-2">
                           <div className="text-xs font-bold text-white truncate">{host.name}</div>
                           <div className="text-[10px] font-mono-tabular text-zinc-400">
-                            {host.address}
+                            {host.address} · {host.bondState || 'BONDED'} · {host.deviceType}
                           </div>
                         </div>
                         <div className="flex items-center gap-1.5 shrink-0">
                           <button
                             onClick={() => onConnectNativeHidHost(host)}
-                            className="px-2.5 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold"
+                            className={`px-2.5 py-1 rounded text-white text-xs font-semibold ${
+                              host.isConnected
+                                ? 'bg-emerald-600 hover:bg-emerald-500'
+                                : 'bg-blue-600 hover:bg-blue-500'
+                            }`}
                           >
                             {host.isConnected ? 'Connected' : 'Connect'}
                           </button>
@@ -457,6 +509,130 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
                     ))}
                   </div>
                 )}
+
+                {/* Detailed Bluetooth HID Connection Diagnostics Section */}
+                <div className="pt-3 border-t border-zinc-800 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-zinc-200 flex items-center gap-1.5">
+                      <Activity className="w-3.5 h-3.5 text-blue-400" />
+                      Bluetooth HID Connection Diagnostics
+                    </span>
+                    <button
+                      onClick={() => setShowBtDiagnostics((v) => !v)}
+                      className="text-[11px] text-zinc-400 hover:text-white font-semibold"
+                    >
+                      {showBtDiagnostics ? 'Hide Details' : 'Show Details'}
+                    </button>
+                  </div>
+
+                  {showBtDiagnostics && (
+                    <div className="space-y-2.5">
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px] font-mono-tabular">
+                        <div className="p-2 rounded bg-[#090a0f] border border-zinc-800">
+                          <div className="text-zinc-500 text-[10px]">1. Adapter Status</div>
+                          <div className="text-zinc-200 font-bold">{adapterStatus}</div>
+                        </div>
+                        <div className="p-2 rounded bg-[#090a0f] border border-zinc-800">
+                          <div className="text-zinc-500 text-[10px]">2. BluetoothHidDevice API</div>
+                          <div className="text-zinc-200 font-bold">
+                            {hidProfileAvailable ? 'AVAILABLE' : 'UNAVAILABLE'}
+                          </div>
+                        </div>
+                        <div className="p-2 rounded bg-[#090a0f] border border-zinc-800">
+                          <div className="text-zinc-500 text-[10px]">3. HID Registration</div>
+                          <div className="text-zinc-200 font-bold">{hidRegistrationStatus}</div>
+                        </div>
+                        <div className="p-2 rounded bg-[#090a0f] border border-zinc-800">
+                          <div className="text-zinc-500 text-[10px]">4. Advertising Status</div>
+                          <div className="text-zinc-200 font-bold">
+                            {isDiscoverable ? 'DISCOVERABLE' : 'NOT ADVERTISING'}
+                          </div>
+                        </div>
+                        <div className="p-2 rounded bg-[#090a0f] border border-zinc-800">
+                          <div className="text-zinc-500 text-[10px]">5. Host Device Address</div>
+                          <div className="text-zinc-200 font-bold truncate">{hostDeviceAddress}</div>
+                        </div>
+                        <div className="p-2 rounded bg-[#090a0f] border border-zinc-800">
+                          <div className="text-zinc-500 text-[10px]">6. Pairing / Bonding</div>
+                          <div className="text-zinc-200 font-bold">{pairingStatus}</div>
+                        </div>
+                        <div className="p-2 rounded bg-[#090a0f] border border-zinc-800">
+                          <div className="text-zinc-500 text-[10px]">7. Connection State</div>
+                          <div className="text-blue-400 font-bold">
+                            {btStatus === 'CONNECTED_NATIVE_HID' ? 'CONNECTED' : btStatus}
+                          </div>
+                        </div>
+                        <div className="p-2 rounded bg-[#090a0f] border border-zinc-800 sm:col-span-2">
+                          <div className="text-zinc-500 text-[10px]">8. HID Registration Callback</div>
+                          <div className="text-zinc-200 font-bold truncate">
+                            {registrationCallbackMessage}
+                          </div>
+                        </div>
+                        <div className="p-2 rounded bg-[#090a0f] border border-zinc-800 sm:col-span-3">
+                          <div className="text-zinc-500 text-[10px]">
+                            9. Last Bluetooth Error · Reports Sent ({btReportsSent})
+                          </div>
+                          <div className="text-amber-300 font-bold">
+                            {btError || 'None (No errors recorded)'}
+                          </div>
+                        </div>
+                      </div>
+
+                      {diagnosticResult && (
+                        <div className="p-2.5 rounded-lg bg-[#090a0f] border border-purple-500/40 space-y-1.5">
+                          <div className="flex items-center justify-between text-xs font-bold">
+                            <span className="text-purple-300">
+                              Bluetooth HID Diagnostic Self-Test Results
+                            </span>
+                            <span
+                              className={
+                                diagnosticResult.allPassed
+                                  ? 'text-emerald-400'
+                                  : diagnosticResult.readyForPairing
+                                  ? 'text-blue-400'
+                                  : 'text-amber-400'
+                              }
+                            >
+                              {diagnosticResult.allPassed
+                                ? 'ALL 6 CHECKS PASSED'
+                                : diagnosticResult.readyForPairing
+                                ? 'HID READY (AWAITING HOST CONNECTION)'
+                                : 'ACTION REQUIRED'}
+                            </span>
+                          </div>
+                          <div className="space-y-1 text-[11px] font-mono-tabular">
+                            {diagnosticResult.steps.map((s, idx) => (
+                              <div key={idx} className="flex items-start gap-2">
+                                <span
+                                  className={
+                                    s.passed ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'
+                                  }
+                                >
+                                  {s.passed ? '[PASS]' : '[WARN]'}
+                                </span>
+                                <span className="text-zinc-200 font-semibold">{s.step}:</span>
+                                <span className="text-zinc-400">{s.detail}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="p-2.5 rounded-lg bg-[#090a0f] border border-zinc-800 space-y-1">
+                        <div className="text-[10px] uppercase text-zinc-500 font-bold">
+                          10. Native BluetoothHidDevice Callback Log (Logcat Tag: GameVoltBT_HID)
+                        </div>
+                        <div className="max-h-28 overflow-y-auto text-[11px] font-mono-tabular text-zinc-300 space-y-0.5">
+                          {callbackLogs.length > 0 ? (
+                            callbackLogs.map((line, i) => <div key={i}>{line}</div>)
+                          ) : (
+                            <div className="text-zinc-500">No native callback events logged yet.</div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* Wi-Fi / LAN Connection & QR Pair */}
@@ -1001,6 +1177,26 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
 
                   <div>
                     <div className="flex justify-between text-xs mb-1">
+                      <span className="text-zinc-400">Stick Sensitivity</span>
+                      <span className="font-mono-tabular text-pink-400 font-bold">
+                        {Math.round(profile.joystickSensitivity * 100)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0.5"
+                      max="3.0"
+                      step="0.1"
+                      value={profile.joystickSensitivity}
+                      onChange={(e) =>
+                        onUpdateProfile({ joystickSensitivity: parseFloat(e.target.value) })
+                      }
+                      className="w-full accent-pink-500"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between text-xs mb-1">
                       <span className="text-zinc-400">Stick Deadzone</span>
                       <span className="font-mono-tabular text-white">
                         {Math.round(profile.joystickDeadzone * 100)}%
@@ -1010,7 +1206,7 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
                       type="range"
                       min="0.0"
                       max="0.35"
-                      step="0.02"
+                      step="0.01"
                       value={profile.joystickDeadzone}
                       onChange={(e) =>
                         onUpdateProfile({ joystickDeadzone: parseFloat(e.target.value) })
@@ -1019,7 +1215,7 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
                     />
                   </div>
 
-                  <div>
+                  <div className="col-span-2">
                     <div className="flex justify-between text-xs mb-1">
                       <span className="text-zinc-400">RGB Brightness</span>
                       <span className="font-mono-tabular text-white">

@@ -18,7 +18,7 @@ import {
   DpadDirection,
 } from './types';
 
-const PROFILES_STORAGE_KEY = 'gamevolt_gamepad_profiles_v3';
+const PROFILES_STORAGE_KEY = 'gamevolt_gamepad_profiles_v4';
 
 const DEFAULT_GAMEVOLT_PROFILE: ControllerProfile = {
   id: 'gamevolt-default',
@@ -26,9 +26,9 @@ const DEFAULT_GAMEVOLT_PROFILE: ControllerProfile = {
   layoutPreset: 'gamevolt',
   buttonScale: 1.0,
   buttonOpacity: 1.0,
-  joystickDeadzone: 0.08,
-  joystickSensitivity: 1.0,
-  triggerSensitivity: 1.0,
+  joystickDeadzone: 0.01,
+  joystickSensitivity: 2.0,
+  triggerSensitivity: 1.5,
   calibration: {
     leftOffsetX: 0,
     leftOffsetY: 0,
@@ -109,11 +109,17 @@ export default function App() {
   const {
     compatibilityInfo,
     adapterStatus,
+    hidProfileAvailable,
     hidRegistrationStatus,
+    registrationCallbackMessage,
     isDiscoverable,
+    pairingStatus,
+    hostDeviceAddress,
     btStatus,
     btDeviceName,
     btError,
+    callbackLogs,
+    diagnosticResult,
     pairedHosts,
     btReportsSent,
     lastHidReport,
@@ -130,6 +136,7 @@ export default function App() {
     sendBluetoothGamepadState,
     sendBluetoothFailsafeRelease,
     disconnectBluetooth,
+    runBluetoothDiagnosticTest,
   } = useBluetoothGamepad();
 
   const [controllerState, setControllerState] = useState<ControllerState>(INITIAL_CONTROLLER_STATE);
@@ -478,11 +485,17 @@ export default function App() {
         onDisconnect={disconnect}
         compatibilityInfo={compatibilityInfo}
         adapterStatus={adapterStatus}
+        hidProfileAvailable={hidProfileAvailable}
         hidRegistrationStatus={hidRegistrationStatus}
+        registrationCallbackMessage={registrationCallbackMessage}
         isDiscoverable={isDiscoverable}
+        pairingStatus={pairingStatus}
+        hostDeviceAddress={hostDeviceAddress}
         btStatus={btStatus}
         btDeviceName={btDeviceName}
         btError={btError}
+        callbackLogs={callbackLogs}
+        diagnosticResult={diagnosticResult}
         pairedHosts={pairedHosts}
         btReportsSent={btReportsSent}
         lastHidReport={lastHidReport}
@@ -497,6 +510,7 @@ export default function App() {
         onReconnectLastHost={reconnectLastBluetoothHost}
         onForgetBluetoothHost={forgetBluetoothHost}
         onDisconnectBluetooth={disconnectBluetooth}
+        onRunBluetoothDiagnosticTest={runBluetoothDiagnosticTest}
         controllerState={controllerState}
         remoteReceivedState={remoteReceivedState}
         lastPacketJson={lastPacketJson}
