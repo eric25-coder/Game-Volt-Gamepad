@@ -116,8 +116,14 @@ export function useBluetoothGamepad() {
       setBtDeviceName(payload.connectedHost.name || payload.connectedHost.address);
     } else if (payload.connectionState === 'CONNECTING') {
       setBtStatus('CONNECTING');
-    } else if (payload.connectionState === 'PAIRING') {
+      setBtDeviceName('Opening HID Channel...');
+    } else if (
+      payload.connectionState === 'PAIRING' ||
+      payload.connectionState === 'PAIRING_REQUESTED' ||
+      payload.connectionState === 'BONDING'
+    ) {
       setBtStatus('PAIRING');
+      setBtDeviceName('Confirm SSP Pairing Prompt...');
     } else if (payload.connectionState === 'BONDED') {
       setBtStatus('BONDED');
       setConnectedHost(null);

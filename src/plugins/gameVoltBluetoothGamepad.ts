@@ -30,11 +30,23 @@ export interface GameVoltCompatibilityResult {
 export type NativeBluetoothConnectionState =
   | 'DISCONNECTED'
   | 'DISCOVERABLE'
+  | 'PAIRING_REQUESTED'
+  | 'BONDING'
   | 'PAIRING'
   | 'BONDED'
   | 'CONNECTING'
   | 'CONNECTED'
   | 'DISCONNECTING';
+
+export type HidLifecycleState =
+  | 'HID_REGISTERED'
+  | 'DISCOVERABLE'
+  | 'PAIRING_REQUESTED'
+  | 'BONDING'
+  | 'BONDED'
+  | 'HID_CONNECTING'
+  | 'HID_CONNECTED'
+  | 'DISCONNECTED';
 
 export interface GameVoltStatusPayload {
   bluetoothEnabled: boolean;
@@ -43,7 +55,16 @@ export interface GameVoltStatusPayload {
   hidRegistered: boolean;
   registrationCallbackMessage?: string;
   discoverable: boolean;
+  pairingRequested?: boolean;
+  bonding?: boolean;
+  bonded?: boolean;
+  hidConnecting?: boolean;
+  hidConnected?: boolean;
+  disconnected?: boolean;
+  lifecycleState?: HidLifecycleState;
   pairingStatus?: 'NONE' | 'PAIRING' | 'BONDED';
+  lastPairingVariant?: string;
+  lastUnbondReason?: string;
   hostDeviceAddress?: string;
   connectionState: NativeBluetoothConnectionState;
   connectedHost: PairedBluetoothHost | null;

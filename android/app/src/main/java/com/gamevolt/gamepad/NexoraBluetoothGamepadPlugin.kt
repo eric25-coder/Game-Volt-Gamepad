@@ -6,17 +6,16 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothClass
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothHidDevice
-import android.bluetooth.BluetoothHidDeviceAppQosSettings
 import android.bluetooth.BluetoothHidDeviceAppSdpSettings
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
-import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
+import android.util.Log
 import androidx.core.content.ContextCompat
 import com.getcapacitor.JSArray
 import com.getcapacitor.JSObject
@@ -27,16 +26,22 @@ import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.CapacitorPlugin
 import com.getcapacitor.annotation.Permission
 import com.getcapacitor.annotation.PermissionCallback
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.roundToInt
 
 /**
  * NexoraBluetoothGamepadPlugin
  *
- * Production Native Android BluetoothHidDevice Capacitor Plugin for Game Volt Gamepad.
- * Registers the Android smartphone as a physical Bluetooth HID Game Controller ("Game Volt Gamepad")
- * using Android's BluetoothHidDevice system service (API 28+).
+ * Native Android BluetoothHidDevice Capacitor Plugin for Game Volt Gamepad.
+ * Aligned with GameVoltBluetoothGamepadPlugin:
+ * - Uses HID_SUBCLASS_GAMEPAD (0x08) instead of SUBCLASS1_COMBO (0xC0) so hosts never demand
+ *   a 6-digit keyboard PIN/passkey entry.
+ * - Uses default L2CAP QoS (null, null) and waits for onAppStatusChanged(registered = true)
+ *   before advertising discoverability.
+ * - Cancels discovery before bonding/connecting and uses Classic BR/EDR (TRANSPORT_BREDR = 1).
  */
 @CapacitorPlugin(
     name = "NexoraBluetoothGamepad",
@@ -61,35 +66,29 @@ import kotlin.math.roundToInt
 class NexoraBluetoothGamepadPlugin : Plugin() {
 
     companion object {
+        private const val TAG = "GameVoltBT_HID"
         const val CONTROLLER_BLUETOOTH_NAME = "Game Volt Gamepad"
         const val REPORT_ID: Int = 1
+        const val HID_SUBCLASS_GAMEPAD: Byte = 0x08.toByte()
+        private const val TRANSPORT_BREDR: Int = 1
     }
 
     private var bluetoothManager: BluetoothManager? = null
     private var bluetoothAdapter: BluetoothAdapter? = null
-    private var hidDevice: BluetoothHidDevice? = null
+    @Volatile private var hidDevice: BluetoothHidDevice? = null
     @Volatile private var connectedHost: BluetoothDevice? = null
     @Volatile private var connectionStateStr: String = "DISCONNECTED"
     private var lastConnectedHostAddress: String? = null
     @Volatile private var isHidRegistered: Boolean = false
     @Volatile private var isDiscoverable: Boolean = false
+    private val isProxyRequestInFlight = AtomicBoolean(false)
+    private val isRegisterAppInFlight = AtomicBoolean(false)
+    private val pendingRegisterCalls = CopyOnWriteArrayList<PluginCall>()
     private val reportsSentCounter = AtomicLong(0)
     @Volatile private var lastReportBytes = byteArrayOf(0, 0, 8, 0, 0, 0, 0, 0, 0)
     private val hidExecutor = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
 
-    /**
-     * Standards-Compliant Universal Gamepad HID Report Descriptor (Report ID 1, 9 Bytes):
-     * - Byte 0: Buttons 1..8  (Bit 0=A, Bit 1=B, Bit 2=X, Bit 3=Y, Bit 4=LB, Bit 5=RB, Bit 6=LT, Bit 7=RT)
-     * - Byte 1: Buttons 9..16 (Bit 0=View, Bit 1=Menu, Bit 2=L3, Bit 3=R3, Bit 4=Home, Bits 5..7=Padding)
-     * - Byte 2: Low nibble = 8-way Hat Switch D-Pad (0=UP, 1=UP_RIGHT, 2=RIGHT, 3=DOWN_RIGHT, 4=DOWN, 5=DOWN_LEFT, 6=LEFT, 7=UP_LEFT, 8=CENTER)
-     *           High nibble = 4-bit constant padding
-     * - Byte 3: Left Stick X  (Usage 0x30 X, Logical -127..+127)
-     * - Byte 4: Left Stick Y  (Usage 0x31 Y, Logical -127..+127)
-     * - Byte 5: Right Stick X (Usage 0x32 Z, Logical -127..+127)
-     * - Byte 6: Right Stick Y (Usage 0x35 Rz, Logical -127..+127)
-     * - Byte 7: Left Trigger  (Usage Page 0x02 Simulation, Usage 0xC5 Brake, Logical 0..255)
-     * - Byte 8: Right Trigger (Usage Page 0x02 Simulation, Usage 0xC4 Accelerator, Logical 0..255)
-     */
     private val UNIVERSAL_GAMEPAD_HID_DESCRIPTOR = byteArrayOf(
         0x05.toByte(), 0x01.toByte(),       // Usage Page (Generic Desktop Ctrls)
         0x09.toByte(), 0x05.toByte(),       // Usage (Game Pad)
@@ -178,18 +177,126 @@ class NexoraBluetoothGamepadPlugin : Plugin() {
         }
     }
 
+    private fun hasBluetoothAdvertisePermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.BLUETOOTH_ADVERTISE
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun cancelDiscoverySafely() {
+        try {
+            if (bluetoothAdapter?.isDiscovering == true) {
+                bluetoothAdapter?.cancelDiscovery()
+            }
+        } catch (_: Exception) {
+        }
+    }
+
     private fun formatHex(bytes: ByteArray): String {
         return bytes.joinToString(" ") { b -> String.format("%02X", b.toInt() and 0xFF) }
+    }
+
+    private val hidCallback = object : BluetoothHidDevice.Callback() {
+        @SuppressLint("MissingPermission")
+        override fun onAppStatusChanged(
+            pluggedDevice: BluetoothDevice?,
+            registered: Boolean
+        ) {
+            isRegisterAppInFlight.set(false)
+            isHidRegistered = registered
+            if (pluggedDevice != null && lastConnectedHostAddress == null) {
+                lastConnectedHostAddress = pluggedDevice.address
+            }
+            val calls = ArrayList(pendingRegisterCalls)
+            pendingRegisterCalls.clear()
+            val err = if (registered) null else "BluetoothHidDevice registration failed."
+            for (c in calls) {
+                c.resolve(buildFullStatusObject(err))
+            }
+            emitStatusUpdate(err)
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onConnectionStateChanged(device: BluetoothDevice, state: Int) {
+            when (state) {
+                BluetoothProfile.STATE_CONNECTED -> {
+                    connectedHost = device
+                    connectionStateStr = "CONNECTED"
+                    lastConnectedHostAddress = device.address
+                    mainHandler.postDelayed({ sendFailsafeZeroReportInternal() }, 150L)
+                    emitStatusUpdate(null)
+                }
+                BluetoothProfile.STATE_CONNECTING -> {
+                    connectionStateStr = "CONNECTING"
+                    emitStatusUpdate(null)
+                }
+                BluetoothProfile.STATE_DISCONNECTING -> {
+                    connectionStateStr = "DISCONNECTING"
+                    emitStatusUpdate(null)
+                }
+                BluetoothProfile.STATE_DISCONNECTED -> {
+                    if (connectedHost?.address == device.address) {
+                        connectedHost = null
+                    }
+                    connectionStateStr = "DISCONNECTED"
+                    emitStatusUpdate(null)
+                }
+            }
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onGetReport(
+            device: BluetoothDevice?,
+            type: Byte,
+            id: Byte,
+            bufferSize: Int
+        ) {
+            if (device != null) {
+                hidDevice?.replyReport(device, type, REPORT_ID.toByte(), lastReportBytes)
+            }
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onSetReport(
+            device: BluetoothDevice?,
+            type: Byte,
+            id: Byte,
+            data: ByteArray?
+        ) {
+            if (device != null) {
+                hidDevice?.reportError(device, BluetoothHidDevice.ERROR_RSP_SUCCESS)
+            }
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onSetProtocol(device: BluetoothDevice?, protocol: Byte) {
+            Log.d(TAG, "Nexora onSetProtocol: $protocol")
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onVirtualCableUnplug(device: BluetoothDevice?) {
+            if (connectedHost?.address == device?.address) {
+                connectedHost = null
+                connectionStateStr = "DISCONNECTED"
+            }
+            emitStatusUpdate(null)
+        }
     }
 
     @PluginMethod
     fun checkCompatibility(call: PluginCall) {
         val sdkInt = Build.VERSION.SDK_INT
         val adapter = bluetoothAdapter
-        val supportedApi = sdkInt >= Build.VERSION_CODES.P // Android 9.0 (API 28+) required for BluetoothHidDevice
+        val supportedApi = sdkInt >= Build.VERSION_CODES.P
         val hasBluetoothHardware = adapter != null
         val isEnabled = adapter?.isEnabled == true
-        val permissionsGranted = hasBluetoothConnectPermission()
+        val permissionsGranted = hasBluetoothConnectPermission() && hasBluetoothAdvertisePermission()
 
         val limitation: String? = when {
             !hasBluetoothHardware -> "This Android device does not have a Bluetooth hardware adapter."
@@ -278,138 +385,35 @@ class NexoraBluetoothGamepadPlugin : Plugin() {
         } catch (_: Exception) {
         }
 
-        // If already registered with an active proxy, return current status immediately
         if (hidDevice != null && isHidRegistered) {
             call.resolve(buildFullStatusObject(null))
+            return
+        }
+
+        pendingRegisterCalls.add(call)
+        val existingHid = hidDevice
+        if (existingHid != null) {
+            registerAppInternal(existingHid)
+            return
+        }
+
+        if (!isProxyRequestInFlight.compareAndSet(false, true)) {
             return
         }
 
         val serviceListener = object : BluetoothProfile.ServiceListener {
             override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
                 if (profile != BluetoothProfile.HID_DEVICE) return
+                isProxyRequestInFlight.set(false)
                 val hid = proxy as BluetoothHidDevice
                 hidDevice = hid
-
-                // Defensively unregister any stale session before registering
-                try {
-                    hid.unregisterApp()
-                } catch (_: Exception) {
-                }
-
-                val sdpSettings = BluetoothHidDeviceAppSdpSettings(
-                    CONTROLLER_BLUETOOTH_NAME,
-                    "Game Volt Wireless Bluetooth HID Game Controller",
-                    "Game Volt",
-                    BluetoothHidDevice.SUBCLASS1_COMBO,
-                    UNIVERSAL_GAMEPAD_HID_DESCRIPTOR
-                )
-
-                val outQos = BluetoothHidDeviceAppQosSettings(
-                    BluetoothHidDeviceAppQosSettings.SERVICE_BEST_EFFORT,
-                    800,
-                    9,
-                    0,
-                    11250,
-                    BluetoothHidDeviceAppQosSettings.MAX
-                )
-
-                val callback = object : BluetoothHidDevice.Callback() {
-                    override fun onAppStatusChanged(
-                        pluggedDevice: BluetoothDevice?,
-                        registered: Boolean
-                    ) {
-                        isHidRegistered = registered
-                        if (pluggedDevice != null && lastConnectedHostAddress == null) {
-                            lastConnectedHostAddress = pluggedDevice.address
-                        }
-                        emitStatusUpdate(
-                            if (registered) null else "Bluetooth HID profile unregistered by Android OS."
-                        )
-                    }
-
-                    override fun onConnectionStateChanged(device: BluetoothDevice, state: Int) {
-                        when (state) {
-                            BluetoothProfile.STATE_CONNECTED -> {
-                                connectedHost = device
-                                connectionStateStr = "CONNECTED"
-                                lastConnectedHostAddress = device.address
-                                // Send initial neutral report so host OS initializes all axes to center
-                                sendFailsafeZeroReportInternal()
-                                emitStatusUpdate(null)
-                            }
-                            BluetoothProfile.STATE_CONNECTING -> {
-                                connectionStateStr = "CONNECTING"
-                                emitStatusUpdate(null)
-                            }
-                            BluetoothProfile.STATE_DISCONNECTING -> {
-                                connectionStateStr = "DISCONNECTING"
-                                emitStatusUpdate(null)
-                            }
-                            BluetoothProfile.STATE_DISCONNECTED -> {
-                                if (connectedHost?.address == device.address) {
-                                    connectedHost = null
-                                }
-                                connectionStateStr = "DISCONNECTED"
-                                emitStatusUpdate(null)
-                            }
-                        }
-                    }
-
-                    override fun onGetReport(
-                        device: BluetoothDevice?,
-                        type: Byte,
-                        id: Byte,
-                        bufferSize: Int
-                    ) {
-                        hidDevice?.replyReport(device, type, REPORT_ID.toByte(), lastReportBytes)
-                    }
-
-                    override fun onSetReport(
-                        device: BluetoothDevice?,
-                        type: Byte,
-                        id: Byte,
-                        data: ByteArray?
-                    ) {
-                        hidDevice?.reportError(device, BluetoothHidDevice.ERROR_RSP_SUCCESS)
-                    }
-
-                    override fun onSetProtocol(device: BluetoothDevice?, protocol: Byte) {
-                        // Accept Report Protocol / Boot Protocol switch from host
-                    }
-
-                    override fun onVirtualCableUnplug(device: BluetoothDevice?) {
-                        if (connectedHost?.address == device?.address) {
-                            connectedHost = null
-                            connectionStateStr = "DISCONNECTED"
-                        }
-                        emitStatusUpdate(null)
-                    }
-                }
-
-                // Pass null for inQos (input-only peripheral) for maximum compatibility across Samsung, Pixel, Xiaomi
-                val registeredOk = hid.registerApp(
-                    sdpSettings,
-                    null,
-                    outQos,
-                    hidExecutor,
-                    callback
-                )
-
-                if (!registeredOk) {
-                    call.resolve(
-                        buildFullStatusObject(
-                            "Android BluetoothHidDevice.registerApp() returned false. Ensure no other controller app is holding the Bluetooth HID profile."
-                        )
-                    )
-                    return
-                }
-
-                isHidRegistered = true
-                call.resolve(buildFullStatusObject(null))
+                registerAppInternal(hid)
             }
 
             override fun onServiceDisconnected(profile: Int) {
                 if (profile == BluetoothProfile.HID_DEVICE) {
+                    isProxyRequestInFlight.set(false)
+                    isRegisterAppInFlight.set(false)
                     hidDevice = null
                     isHidRegistered = false
                     connectedHost = null
@@ -421,11 +425,41 @@ class NexoraBluetoothGamepadPlugin : Plugin() {
 
         val proxyRequested = adapter.getProfileProxy(context, serviceListener, BluetoothProfile.HID_DEVICE)
         if (!proxyRequested) {
-            call.resolve(
-                buildFullStatusObject(
-                    "This Android ROM rejected BluetoothProfile.HID_DEVICE access. Some custom OEM firmwares disable the Bluetooth HID peripheral profile."
+            isProxyRequestInFlight.set(false)
+            val calls = ArrayList(pendingRegisterCalls)
+            pendingRegisterCalls.clear()
+            for (c in calls) {
+                c.resolve(
+                    buildFullStatusObject(
+                        "This Android ROM rejected BluetoothProfile.HID_DEVICE access."
+                    )
                 )
-            )
+            }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun registerAppInternal(hid: BluetoothHidDevice) {
+        if (!isRegisterAppInFlight.compareAndSet(false, true)) return
+        val sdpSettings = BluetoothHidDeviceAppSdpSettings(
+            CONTROLLER_BLUETOOTH_NAME,
+            "Game Volt Wireless Bluetooth HID Game Controller",
+            "Game Volt",
+            HID_SUBCLASS_GAMEPAD,
+            UNIVERSAL_GAMEPAD_HID_DESCRIPTOR
+        )
+        val registeredOk = hid.registerApp(sdpSettings, null, null, hidExecutor, hidCallback)
+        if (!registeredOk) {
+            isRegisterAppInFlight.set(false)
+            val calls = ArrayList(pendingRegisterCalls)
+            pendingRegisterCalls.clear()
+            for (c in calls) {
+                c.resolve(
+                    buildFullStatusObject(
+                        "Android BluetoothHidDevice.registerApp() returned false."
+                    )
+                )
+            }
         }
     }
 
@@ -450,6 +484,10 @@ class NexoraBluetoothGamepadPlugin : Plugin() {
         val adapter = bluetoothAdapter
         if (adapter == null || !adapter.isEnabled) {
             call.resolve(buildFullStatusObject("Turn on Bluetooth before starting pairing."))
+            return
+        }
+        if (!isHidRegistered) {
+            call.resolve(buildFullStatusObject("Register HID profile first before advertising as discoverable."))
             return
         }
         try {
@@ -511,19 +549,43 @@ class NexoraBluetoothGamepadPlugin : Plugin() {
         }
 
         return try {
+            cancelDiscoverySafely()
             val device = adapter.getRemoteDevice(address)
-            connectionStateStr = "CONNECTING"
-            val initiated = hid.connect(device)
-            if (!initiated) {
-                connectionStateStr = "DISCONNECTED"
-                call.resolve(
-                    buildFullStatusObject(
-                        "Host ${device.name ?: address} rejected the HID connection request. Make sure Bluetooth is open on the host."
-                    )
-                )
-            } else {
-                lastConnectedHostAddress = address
-                call.resolve(buildFullStatusObject(null))
+            when (device.bondState) {
+                BluetoothDevice.BOND_NONE -> {
+                    connectionStateStr = "PAIRING"
+                    val started = try {
+                        val m = device.javaClass.getMethod("createBond", Int::class.javaPrimitiveType)
+                        m.invoke(device, TRANSPORT_BREDR) as? Boolean ?: device.createBond()
+                    } catch (_: Exception) {
+                        device.createBond()
+                    }
+                    if (!started) {
+                        connectionStateStr = "DISCONNECTED"
+                        call.resolve(buildFullStatusObject("Could not start Classic Bluetooth bonding with $address."))
+                    } else {
+                        call.resolve(buildFullStatusObject(null))
+                    }
+                }
+                BluetoothDevice.BOND_BONDING -> {
+                    connectionStateStr = "PAIRING"
+                    call.resolve(buildFullStatusObject(null))
+                }
+                else -> {
+                    connectionStateStr = "CONNECTING"
+                    val initiated = hid.connect(device)
+                    if (!initiated) {
+                        connectionStateStr = "BONDED"
+                        call.resolve(
+                            buildFullStatusObject(
+                                "Host ${device.name ?: address} rejected the HID connection request."
+                            )
+                        )
+                    } else {
+                        lastConnectedHostAddress = address
+                        call.resolve(buildFullStatusObject(null))
+                    }
+                }
             }
         } catch (ex: Exception) {
             connectionStateStr = "DISCONNECTED"
@@ -546,6 +608,7 @@ class NexoraBluetoothGamepadPlugin : Plugin() {
             call.resolve(buildFullStatusObject("No paired Bluetooth host found. Pair your PC or TV first."))
             return
         }
+        cancelDiscoverySafely()
         val device = adapter.getRemoteDevice(targetAddress)
         connectionStateStr = "CONNECTING"
         val ok = hid.connect(device)
@@ -674,7 +737,6 @@ class NexoraBluetoothGamepadPlugin : Plugin() {
         val majorClass = device.bluetoothClass?.majorDeviceClass
         val devName = (device.name ?: "").lowercase()
 
-        // Detect consoles or audio-only headsets that do not accept standard Bluetooth HID gamepads
         if (devName.contains("playstation") || devName.contains("ps4") || devName.contains("ps5")) {
             return Triple(
                 "Console (Restricted)",

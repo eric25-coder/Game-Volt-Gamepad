@@ -44,18 +44,27 @@ import kotlin.math.roundToInt
  * Production Native Android BluetoothHidDevice Capacitor Plugin ("GameVoltBluetoothGamepad")
  * for Game Volt Gamepad.
  *
- * Fixes & Architecture:
- * 1. Waits for asynchronous `onAppStatusChanged(registered = true)` before marking HID ready
- *    or starting Bluetooth discoverability, preventing SDP missing-service race conditions.
- * 2. Never calls `unregisterApp()` immediately before `registerApp()` on an active proxy.
- * 3. Uses `SUBCLASS1_NONE` and default L2CAP QoS (`inQos = null, outQos = null`) so Windows 10/11
- *    and Android TV hosts do not reject L2CAP Interrupt channel (PSM 0x0013) QoS negotiation.
- * 4. Resets HID Global Items (`Unit = 0`, `Physical Maximum = 0`) after the 4-bit Hat Switch
- *    in the 9-byte Report ID 1 HID Descriptor so Windows `hidparse.sys` and Android `hid-generic`
- *    parse all 4 analog thumbstick axes and 2 analog triggers accurately.
- * 5. Tracks full Pairing/Bonding (`BOND_NONE`, `BOND_BONDING`, `BOND_BONDED`) and HID Connection
- *    states (`DISCONNECTED`, `DISCOVERABLE`, `PAIRING`, `BONDED`, `CONNECTING`, `CONNECTED`)
- *    with a 15-second connection watchdog timer and detailed Logcat + UI callback history.
+ * Key Pairing & HID Architecture:
+ * 1. Registers SDP with Standard Gamepad HID Subclass (`0x08` = Gamepad minor device class, with
+ *    Keyboard bit `0x40` = 0) and default L2CAP QoS (`inQos = null, outQos = null`) so hosts
+ *    identify the device as a standard Gamepad and use Bluetooth Secure Simple Pairing (SSP)
+ *    instead of demanding a 6-digit keyboard PIN/passkey entry.
+ * 2. Validates the 67-byte HID Report Descriptor (Report ID 1, 9-byte payload) and waits for
+ *    asynchronous `onAppStatusChanged(registered = true)` before allowing discoverability or
+ *    connection attempts. Never advertises as ready if registration failed.
+ * 3. Implements genuine Bluetooth Secure Simple Pairing (SSP):
+ *    - Never hardcodes or generates a PIN (`0000`, `1234`, etc.) or calls `setPin()`.
+ *    - Never aborts `ACTION_PAIRING_REQUEST` broadcasts so Android's system SSP dialog functions.
+ *    - Cancels active Bluetooth inquiry discovery (`cancelDiscovery()`) before bonding or connecting
+ *      to prevent baseband page-scan collisions (`UNBOND_REASON_DISCOVERY_IN_PROGRESS` / `AUTH_FAILED`).
+ *    - Forces Classic BR/EDR transport (`TRANSPORT_BREDR = 1`) when initiating `createBond` so
+ *      dual-mode hosts do not fail with BLE SMP PIN/passkey errors.
+ *    - Prevents duplicate `createBond()` calls when already `BOND_BONDING` or `BOND_BONDED`.
+ *    - Inspects hidden `android.bluetooth.device.extra.REASON` on bond failure to accurately diagnose
+ *      stale link keys (`UNBOND_REASON_AUTH_FAILED = 1`) vs timeouts or host rejections.
+ * 4. Independently tracks all 8 lifecycle states:
+ *    - `hidRegistered`, `discoverable`, `pairingRequested`, `bonding`, `bonded`,
+ *      `hidConnecting`, `hidConnected`, `disconnected`.
  */
 @CapacitorPlugin(
     name = "GameVoltBluetoothGamepad",
@@ -83,8 +92,26 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
         private const val TAG = "GameVoltBT_HID"
         const val CONTROLLER_BLUETOOTH_NAME = "Game Volt Gamepad"
         const val REPORT_ID: Int = 1
+
+        /**
+         * Bluetooth HID Minor Subclass for a Standard Gamepad (0x08 = bits 5..2 `0010` Gamepad,
+         * bits 7..6 `00` non-keyboard/non-pointing). Ensures hosts classify the device as a
+         * Gamepad (CoD 0x0508) and use Secure Simple Pairing (SSP) without requesting a keyboard PIN.
+         */
+        const val HID_SUBCLASS_GAMEPAD: Byte = 0x08.toByte()
+
+        /**
+         * BluetoothDevice.TRANSPORT_BREDR = 1 (Classic Bluetooth required for BluetoothHidDevice L2CAP).
+         */
+        private const val TRANSPORT_BREDR: Int = 1
+
+        /**
+         * Hidden Android Intent extra for bond failure reason in ACTION_BOND_STATE_CHANGED.
+         */
+        private const val EXTRA_UNBOND_REASON = "android.bluetooth.device.extra.REASON"
+
         private const val CONNECTION_TIMEOUT_MS = 15000L
-        private const val MAX_CALLBACK_LOGS = 40
+        private const val MAX_CALLBACK_LOGS = 50
     }
 
     private var bluetoothManager: BluetoothManager? = null
@@ -94,20 +121,31 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
     private val isProxyRequestInFlight = AtomicBoolean(false)
     private val isRegisterAppInFlight = AtomicBoolean(false)
 
+    // Independent state flags (Requirement 4)
     @Volatile private var isHidProfileAvailable: Boolean = false
     @Volatile private var isHidRegistered: Boolean = false
     @Volatile private var isDiscoverable: Boolean = false
+    @Volatile private var isPairingRequested: Boolean = false
+    @Volatile private var isBonding: Boolean = false
+    @Volatile private var isBonded: Boolean = false
+    @Volatile private var isHidConnecting: Boolean = false
+    @Volatile private var isHidConnected: Boolean = false
 
     @Volatile private var connectedHost: BluetoothDevice? = null
     @Volatile private var activeTargetDevice: BluetoothDevice? = null
+    @Volatile private var bondingInProgressAddress: String? = null
+    @Volatile private var pendingConnectAfterBondAddress: String? = null
+    @Volatile private var lastConnectedHostAddress: String? = null
+
     @Volatile private var connectionStateStr: String = "DISCONNECTED"
     @Volatile private var pairingStatusStr: String = "NONE"
+    @Volatile private var lastPairingVariantStr: String = "NONE"
+    @Volatile private var lastUnbondReasonStr: String = "NONE"
     @Volatile private var lastRegistrationCallbackMsg: String = "Not called yet"
     @Volatile private var lastErrorMsg: String? = null
-    @Volatile private var lastConnectedHostAddress: String? = null
-    @Volatile private var pendingConnectAfterBondAddress: String? = null
 
     private val pendingRegisterCalls = CopyOnWriteArrayList<PluginCall>()
+    private val pendingDiscoverableCalls = CopyOnWriteArrayList<PluginCall>()
     private val callbackHistory = CopyOnWriteArrayList<String>()
     private val reportsSentCounter = AtomicLong(0)
     @Volatile private var lastReportBytes = byteArrayOf(0, 0, 8, 0, 0, 0, 0, 0, 0)
@@ -157,7 +195,7 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
         0x95.toByte(), 0x01.toByte(),       //   Report Count (1)
         0x81.toByte(), 0x42.toByte(),       //   Input (Data,Var,Abs,Null)
 
-        // Reset Global Unit & Physical bounds so following axes are not angular
+        // Reset Global Unit & Physical bounds so following axes are linear
         0x65.toByte(), 0x00.toByte(),       //   Unit (None)
         0x45.toByte(), 0x00.toByte(),       //   Physical Maximum (0)
         0x75.toByte(), 0x04.toByte(),       //   Report Size (4 bits padding)
@@ -189,6 +227,29 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
         0xC0.toByte()                       // End Collection
     )
 
+    /**
+     * Validates that the HID Report Descriptor is structurally well-formed and declares
+     * Application Collection Usage Page 0x01 (Generic Desktop) / Usage 0x05 (Game Pad) with Report ID 1.
+     */
+    private fun validateHidDescriptor(descriptor: ByteArray): Boolean {
+        if (descriptor.size != 67) return false
+        val hasGamepadHeader =
+            descriptor[0] == 0x05.toByte() &&
+            descriptor[1] == 0x01.toByte() &&
+            descriptor[2] == 0x09.toByte() &&
+            descriptor[3] == 0x05.toByte() &&
+            descriptor[4] == 0xA1.toByte() &&
+            descriptor[5] == 0x01.toByte()
+        val hasReportId =
+            descriptor[6] == 0x85.toByte() &&
+            descriptor[7] == REPORT_ID.toByte()
+        val hasEndCollection = descriptor[descriptor.size - 1] == 0xC0.toByte()
+        return hasGamepadHeader && hasReportId && hasEndCollection
+    }
+
+    /**
+     * Appends a sanitized diagnostic log entry (never logs PINs, passkeys, or secrets).
+     */
     private fun appendCallbackLog(event: String, isError: Boolean = false) {
         val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
         val line = "[$timestamp] $event"
@@ -201,6 +262,48 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
         callbackHistory.add(0, line)
         while (callbackHistory.size > MAX_CALLBACK_LOGS) {
             callbackHistory.removeAt(callbackHistory.size - 1)
+        }
+    }
+
+    /**
+     * Translates Android BluetoothDevice pairing variant constants into human-readable names
+     * without ever reading or logging any passkey/PIN value.
+     */
+    private fun pairingVariantToString(variant: Int): String {
+        return when (variant) {
+            BluetoothDevice.PAIRING_VARIANT_PIN -> "PAIRING_VARIANT_PIN (0 - Legacy PIN)"
+            1 -> "PAIRING_VARIANT_PASSKEY (1 - Passkey)"
+            BluetoothDevice.PAIRING_VARIANT_PASSKEY_CONFIRMATION ->
+                "PAIRING_VARIANT_PASSKEY_CONFIRMATION (2 - SSP Numeric Comparison)"
+            3 -> "PAIRING_VARIANT_CONSENT (3 - SSP Just Works / Consent)"
+            4 -> "PAIRING_VARIANT_DISPLAY_PASSKEY (4 - Display Passkey)"
+            5 -> "PAIRING_VARIANT_DISPLAY_PIN (5 - Display PIN)"
+            6 -> "PAIRING_VARIANT_OOB_CONSENT (6 - Out of Band)"
+            7 -> "PAIRING_VARIANT_PIN_16_DIGITS (7 - 16-Digit PIN)"
+            else -> "UNKNOWN_VARIANT ($variant)"
+        }
+    }
+
+    /**
+     * Translates hidden Android BluetoothDevice.EXTRA_REASON unbond codes into actionable diagnostics.
+     */
+    private fun unbondReasonToString(reason: Int, deviceLabel: String): String {
+        return when (reason) {
+            1 -> "AUTH_FAILED (reason=1): PIN/Passkey or Link-Key mismatch with $deviceLabel. " +
+                "This happens when either the host ($deviceLabel) or this phone still holds an old pairing key, " +
+                "or when pairing was started from both devices simultaneously. " +
+                "Fix: Forget/Remove the pairing on BOTH $deviceLabel and this phone, tap 'Make Discoverable', " +
+                "and initiate pairing from $deviceLabel's Bluetooth menu."
+            2 -> "AUTH_REJECTED (reason=2): $deviceLabel rejected the pairing request."
+            3 -> "AUTH_CANCELED (reason=3): Pairing with $deviceLabel was canceled."
+            4 -> "REMOTE_DEVICE_DOWN (reason=4): $deviceLabel is unreachable or Bluetooth is off."
+            5 -> "DISCOVERY_IN_PROGRESS (reason=5): Bluetooth scan was active during bonding with $deviceLabel."
+            6 -> "AUTH_TIMEOUT (reason=6): Pairing confirmation timed out before 'Pair' was accepted on both screens."
+            7 -> "REPEATED_ATTEMPTS (reason=7): Too many rapid pairing attempts with $deviceLabel; wait 10 seconds and retry."
+            8 -> "REMOTE_AUTH_CANCELED (reason=8): $deviceLabel canceled authentication (often caused by a stale pairing entry on $deviceLabel). " +
+                "Remove 'Game Volt Gamepad' (or this phone's name) from $deviceLabel's Bluetooth list and pair again."
+            9 -> "REMOVED (reason=9): Existing bond with $deviceLabel was removed/forgotten."
+            else -> "UNBOND_REASON ($reason) for $deviceLabel."
         }
     }
 
@@ -220,6 +323,7 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
                             "ScanModeChanged: discoverable=$isDiscoverable (mode=$mode)"
                         )
                     }
+                    syncLifecycleStateString()
                     emitStatusUpdate(null)
                 }
 
@@ -233,10 +337,17 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
                             cancelConnectionWatchdog()
                             connectedHost = null
                             activeTargetDevice = null
-                            connectionStateStr = "DISCONNECTED"
-                            pairingStatusStr = "NONE"
+                            bondingInProgressAddress = null
+                            pendingConnectAfterBondAddress = null
                             isHidRegistered = false
                             isDiscoverable = false
+                            isPairingRequested = false
+                            isBonding = false
+                            isBonded = false
+                            isHidConnecting = false
+                            isHidConnected = false
+                            connectionStateStr = "DISCONNECTED"
+                            pairingStatusStr = "NONE"
                             isRegisterAppInFlight.set(false)
                             appendCallbackLog("Bluetooth adapter turned OFF", isError = true)
                             emitStatusUpdate("Bluetooth adapter is turned off.")
@@ -256,14 +367,38 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
                         intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
                     }
                     val variant = intent.getIntExtra(BluetoothDevice.EXTRA_PAIRING_VARIANT, -1)
-                    activeTargetDevice = device
-                    pairingStatusStr = "PAIRING"
-                    if (connectionStateStr != "CONNECTED") {
-                        connectionStateStr = "PAIRING"
+                    val variantDesc = pairingVariantToString(variant)
+                    lastPairingVariantStr = variantDesc
+
+                    val devAddr = device?.address ?: "unknown"
+                    val devName = safeDeviceName(device)
+
+                    // Security check: verify whether pairing was user-authorized (either user made
+                    // gamepad discoverable OR explicitly selected this device as activeTargetDevice)
+                    val isExpectedSource = isDiscoverable ||
+                        activeTargetDevice?.address == devAddr ||
+                        pendingConnectAfterBondAddress == devAddr
+
+                    if (!isExpectedSource) {
+                        appendCallbackLog(
+                            "Security Notice: Unsolicited ACTION_PAIRING_REQUEST from $devName [$devAddr] ($variantDesc) while not discoverable; deferring to Android OS user prompt."
+                        )
+                    } else {
+                        activeTargetDevice = device
+                        appendCallbackLog(
+                            "ACTION_PAIRING_REQUEST from $devName [$devAddr] | variant=$variantDesc | SSP flow handed to Android system confirmation dialog"
+                        )
                     }
-                    appendCallbackLog(
-                        "Pairing request from ${safeDeviceName(device)} [${device?.address ?: "unknown"}] (variant=$variant)"
-                    )
+
+                    // IMPORTANT:
+                    // 1. Do NOT call device.setPin(...) with any hardcoded or random PIN.
+                    // 2. Do NOT call abortBroadcast() — let Android's native Secure Simple Pairing
+                    //    (SSP) dialog prompt the user cleanly.
+                    isPairingRequested = true
+                    pairingStatusStr = "PAIRING"
+                    if (!isHidConnected) {
+                        connectionStateStr = "PAIRING_REQUESTED"
+                    }
                     emitStatusUpdate(null)
                 }
 
@@ -282,54 +417,83 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
                         BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE,
                         BluetoothDevice.BOND_NONE
                     )
+                    val unbondReason = intent.getIntExtra(EXTRA_UNBOND_REASON, -1)
 
                     if (device != null) {
                         activeTargetDevice = device
                     }
+                    val devLabel = "${safeDeviceName(device)} [${device?.address ?: "unknown"}]"
 
                     when (bondState) {
                         BluetoothDevice.BOND_BONDING -> {
+                            bondingInProgressAddress = device?.address
+                            isBonding = true
+                            isBonded = false
                             pairingStatusStr = "PAIRING"
-                            if (connectionStateStr != "CONNECTED") {
-                                connectionStateStr = "PAIRING"
+                            if (!isHidConnected) {
+                                connectionStateStr = "BONDING"
                             }
                             appendCallbackLog(
-                                "BondStateChanged: ${safeDeviceName(device)} [${device?.address}] BOND_BONDING"
+                                "BondStateChanged: $devLabel ${bondStateToString(prevBondState)} -> BOND_BONDING (variant=$lastPairingVariantStr)"
                             )
                         }
+
                         BluetoothDevice.BOND_BONDED -> {
+                            bondingInProgressAddress = null
+                            isPairingRequested = false
+                            isBonding = false
+                            isBonded = true
+                            lastUnbondReasonStr = "NONE"
                             pairingStatusStr = "BONDED"
-                            if (connectionStateStr != "CONNECTED" && connectionStateStr != "CONNECTING") {
+                            if (!isHidConnected && !isHidConnecting) {
                                 connectionStateStr = "BONDED"
                             }
                             appendCallbackLog(
-                                "BondStateChanged: ${safeDeviceName(device)} [${device?.address}] BOND_BONDED (prev=$prevBondState)"
+                                "BondStateChanged: $devLabel ${bondStateToString(prevBondState)} -> BOND_BONDED (Pairing succeeded)"
                             )
-                            // If this bond completed from a user-initiated or host-initiated pairing,
-                            // wait 1200ms to allow host-initiated L2CAP HID open; if still not connected,
-                            // initiate HID connection from the peripheral side.
                             if (device != null) {
-                                val bondedAddr = device.address
-                                lastConnectedHostAddress = bondedAddr
+                                lastConnectedHostAddress = device.address
+                                // Wait 1000ms for the host to initiate L2CAP HID channels (0x0011/0x0013);
+                                // if the host hasn't connected yet, initiate HID connection from peripheral.
                                 mainHandler.postDelayed({
                                     autoConnectAfterBondIfNeeded(device)
-                                }, 1200L)
+                                }, 1000L)
                             }
                         }
+
                         BluetoothDevice.BOND_NONE -> {
+                            bondingInProgressAddress = null
+                            pendingConnectAfterBondAddress = null
+                            isPairingRequested = false
+                            isBonding = false
+                            isBonded = false
                             pairingStatusStr = "NONE"
+
                             if (connectedHost?.address == device?.address) {
                                 connectedHost = null
+                                isHidConnected = false
+                                isHidConnecting = false
                                 connectionStateStr = "DISCONNECTED"
-                            } else if (connectionStateStr == "PAIRING" || connectionStateStr == "BONDED") {
-                                connectionStateStr = "DISCONNECTED"
+                            } else if (!isHidConnected) {
+                                isHidConnecting = false
+                                connectionStateStr = if (isDiscoverable) "DISCOVERABLE" else "DISCONNECTED"
                             }
-                            val failReason = if (prevBondState == BluetoothDevice.BOND_BONDING) {
-                                "Pairing with ${safeDeviceName(device)} [${device?.address}] failed or was rejected by host."
+
+                            val detailedReason = unbondReasonToString(unbondReason, devLabel)
+                            lastUnbondReasonStr = detailedReason
+
+                            if (prevBondState == BluetoothDevice.BOND_BONDING) {
+                                appendCallbackLog(
+                                    "BondStateChanged: $devLabel BOND_BONDING -> BOND_NONE | $detailedReason",
+                                    isError = true
+                                )
+                                emitStatusUpdate(detailedReason)
+                                return
                             } else {
-                                "Bond removed for ${safeDeviceName(device)} [${device?.address}]."
+                                appendCallbackLog(
+                                    "BondStateChanged: $devLabel ${bondStateToString(prevBondState)} -> BOND_NONE | $detailedReason"
+                                )
                             }
-                            appendCallbackLog(failReason, isError = (prevBondState == BluetoothDevice.BOND_BONDING))
                         }
                     }
                     emitStatusUpdate(null)
@@ -339,27 +503,74 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
     }
 
     @SuppressLint("MissingPermission")
+    private fun cancelDiscoverySafely() {
+        try {
+            val adapter = bluetoothAdapter ?: return
+            if (hasBluetoothScanPermission() && adapter.isDiscovering) {
+                adapter.cancelDiscovery()
+                appendCallbackLog("Canceled active Bluetooth discovery to prevent bonding/L2CAP radio collision.")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "cancelDiscoverySafely ignored exception: ${e.message}")
+        }
+    }
+
+    /**
+     * Initiates Classic BR/EDR bonding (`TRANSPORT_BREDR = 1`) so dual-mode devices (Windows 11,
+     * Android TV, smartphones) do not attempt BLE GATT SMP pairing when pairing with a Classic
+     * BluetoothHidDevice peripheral.
+     */
+    @SuppressLint("MissingPermission")
+    private fun createBondBrEdr(device: BluetoothDevice): Boolean {
+        cancelDiscoverySafely()
+        return try {
+            val createBondMethod = device.javaClass.getMethod("createBond", Int::class.javaPrimitiveType)
+            val res = createBondMethod.invoke(device, TRANSPORT_BREDR) as? Boolean
+            appendCallbackLog("Invoked createBond(TRANSPORT_BREDR=1) for ${safeDeviceName(device)} [${device.address}] -> $res")
+            res ?: device.createBond()
+        } catch (_: Exception) {
+            val res = device.createBond()
+            appendCallbackLog("Invoked standard createBond() for ${safeDeviceName(device)} [${device.address}] -> $res")
+            res
+        }
+    }
+
+    @SuppressLint("MissingPermission")
     private fun autoConnectAfterBondIfNeeded(device: BluetoothDevice) {
         val hid = hidDevice ?: return
         if (!isHidRegistered || !hasBluetoothConnectPermission()) return
+        if (device.bondState != BluetoothDevice.BOND_BONDED) return
+
         val currentHidState = try {
             hid.getConnectionState(device)
         } catch (_: Exception) {
             BluetoothProfile.STATE_DISCONNECTED
         }
-        if (currentHidState == BluetoothProfile.STATE_CONNECTED ||
-            currentHidState == BluetoothProfile.STATE_CONNECTING
-        ) {
+        if (currentHidState == BluetoothProfile.STATE_CONNECTED) {
+            connectedHost = device
+            isHidConnected = true
+            isHidConnecting = false
+            connectionStateStr = "CONNECTED"
             appendCallbackLog(
-                "Post-bond check: Host ${safeDeviceName(device)} [${device.address}] already in HID state $currentHidState"
+                "Post-bond check: Host ${safeDeviceName(device)} [${device.address}] already connected to HID profile."
+            )
+            emitStatusUpdate(null)
+            return
+        }
+        if (currentHidState == BluetoothProfile.STATE_CONNECTING || isHidConnecting) {
+            appendCallbackLog(
+                "Post-bond check: Host ${safeDeviceName(device)} [${device.address}] is already in HID_CONNECTING state."
             )
             return
         }
+
         if (pendingConnectAfterBondAddress == device.address || connectedHost == null) {
             pendingConnectAfterBondAddress = null
+            cancelDiscoverySafely()
             appendCallbackLog(
-                "Initiating HID L2CAP connection to newly bonded host ${safeDeviceName(device)} [${device.address}]"
+                "Initiating post-bond BluetoothHidDevice.connect() to bonded host ${safeDeviceName(device)} [${device.address}]"
             )
+            isHidConnecting = true
             connectionStateStr = "CONNECTING"
             startConnectionWatchdog(device)
             val ok = try {
@@ -370,9 +581,10 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
             }
             if (!ok) {
                 cancelConnectionWatchdog()
+                isHidConnecting = false
                 connectionStateStr = "BONDED"
                 appendCallbackLog(
-                    "hid.connect(${device.address}) returned false after bonding; waiting for host to initiate HID channel."
+                    "hid.connect(${device.address}) returned false after bonding; host remained BONDED (connect from host Bluetooth menu)."
                 )
             }
             emitStatusUpdate(null)
@@ -461,20 +673,30 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
         }
     }
 
+    private fun syncLifecycleStateString() {
+        connectionStateStr = when {
+            isHidConnected && connectedHost != null -> "CONNECTED"
+            isHidConnecting -> "CONNECTING"
+            isBonding -> "BONDING"
+            isPairingRequested -> "PAIRING_REQUESTED"
+            isBonded -> "BONDED"
+            isDiscoverable && isHidRegistered -> "DISCOVERABLE"
+            else -> "DISCONNECTED"
+        }
+    }
+
     private fun startConnectionWatchdog(target: BluetoothDevice) {
         cancelConnectionWatchdog()
         val runnable = Runnable {
-            if (connectionStateStr == "CONNECTING") {
-                connectionStateStr = if (
-                    hasBluetoothConnectPermission() &&
+            if (isHidConnecting || connectionStateStr == "CONNECTING") {
+                isHidConnecting = false
+                val bondedNow = hasBluetoothConnectPermission() &&
                     target.bondState == BluetoothDevice.BOND_BONDED
-                ) {
-                    "BONDED"
-                } else {
-                    "DISCONNECTED"
-                }
+                isBonded = bondedNow
+                connectionStateStr = if (bondedNow) "BONDED" else "DISCONNECTED"
                 val timeoutMsg =
-                    "HID connection to ${safeDeviceName(target)} [${target.address}] timed out after ${CONNECTION_TIMEOUT_MS / 1000}s. If you previously paired this phone, remove/forget 'Game Volt Gamepad' on the host and pair again."
+                    "HID connection to ${safeDeviceName(target)} [${target.address}] timed out after ${CONNECTION_TIMEOUT_MS / 1000}s. " +
+                    "If ${safeDeviceName(target)} is another phone/PC with a stale pairing entry, forget/unpair on both devices and pair from the host's Bluetooth settings."
                 appendCallbackLog(timeoutMsg, isError = true)
                 emitStatusUpdate(timeoutMsg)
             }
@@ -513,33 +735,54 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
                 if (pluggedDevice != null) {
                     activeTargetDevice = pluggedDevice
                     lastConnectedHostAddress = pluggedDevice.address
-                    if (pluggedDevice.bondState == BluetoothDevice.BOND_BONDED) {
+                    if (hasBluetoothConnectPermission() &&
+                        pluggedDevice.bondState == BluetoothDevice.BOND_BONDED
+                    ) {
+                        isBonded = true
                         pairingStatusStr = "BONDED"
                     }
                     val hid = hidDevice
                     if (hid != null &&
+                        hasBluetoothConnectPermission() &&
                         hid.getConnectionState(pluggedDevice) == BluetoothProfile.STATE_CONNECTED
                     ) {
                         connectedHost = pluggedDevice
+                        isHidConnected = true
+                        isHidConnecting = false
                         connectionStateStr = "CONNECTED"
                         appendCallbackLog("Already connected to pluggedDevice $pluggedInfo")
                     }
                 }
             } else {
                 connectedHost = null
+                isHidConnected = false
+                isHidConnecting = false
                 connectionStateStr = "DISCONNECTED"
             }
 
-            // Resolve any pending registerGamepad PluginCalls waiting for actual registration callback
-            val callsToResolve = ArrayList(pendingRegisterCalls)
+            // 1. Resolve any pending registerGamepad PluginCalls
+            val regCalls = ArrayList(pendingRegisterCalls)
             pendingRegisterCalls.clear()
             val err = if (registered) {
                 null
             } else {
-                "BluetoothHidDevice.Callback.onAppStatusChanged reported registered=false."
+                "BluetoothHidDevice.Callback.onAppStatusChanged reported registered=false. Do not advertise gamepad as ready."
             }
-            for (pendingCall in callsToResolve) {
+            for (pendingCall in regCalls) {
                 pendingCall.resolve(buildFullStatusObject(err))
+            }
+
+            // 2. Handle any startPairing calls that were waiting for HID registration to succeed first
+            val discCalls = ArrayList(pendingDiscoverableCalls)
+            pendingDiscoverableCalls.clear()
+            for (discCall in discCalls) {
+                if (registered) {
+                    launchDiscoverableIntent(discCall)
+                } else {
+                    val failMsg = "Cannot make gamepad discoverable because BluetoothHidDevice registration failed."
+                    appendCallbackLog(failMsg, isError = true)
+                    discCall.resolve(buildFullStatusObject(failMsg))
+                }
             }
 
             emitStatusUpdate(err)
@@ -548,8 +791,13 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
         @SuppressLint("MissingPermission")
         override fun onConnectionStateChanged(device: BluetoothDevice, state: Int) {
             activeTargetDevice = device
-            if (hasBluetoothConnectPermission() && device.bondState == BluetoothDevice.BOND_BONDED) {
+            val devBonded = hasBluetoothConnectPermission() &&
+                device.bondState == BluetoothDevice.BOND_BONDED
+            isBonded = devBonded
+            if (devBonded) {
                 pairingStatusStr = "BONDED"
+                isBonding = false
+                isPairingRequested = false
             }
 
             when (state) {
@@ -557,11 +805,14 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
                     cancelConnectionWatchdog()
                     connectedHost = device
                     lastConnectedHostAddress = device.address
+                    isHidConnecting = false
+                    isHidConnected = true
+                    isBonded = true
                     connectionStateStr = "CONNECTED"
                     pairingStatusStr = "BONDED"
                     lastErrorMsg = null
                     appendCallbackLog(
-                        "onConnectionStateChanged: CONNECTED to ${safeDeviceName(device)} [${device.address}]"
+                        "onConnectionStateChanged: HID_CONNECTED to ${safeDeviceName(device)} [${device.address}]"
                     )
                     // Send initial neutral report after 150ms so host L2CAP interrupt channel is ready
                     mainHandler.postDelayed({
@@ -571,15 +822,18 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
                 }
 
                 BluetoothProfile.STATE_CONNECTING -> {
+                    isHidConnecting = true
+                    isHidConnected = false
                     connectionStateStr = "CONNECTING"
                     appendCallbackLog(
-                        "onConnectionStateChanged: CONNECTING to ${safeDeviceName(device)} [${device.address}]"
+                        "onConnectionStateChanged: HID_CONNECTING to ${safeDeviceName(device)} [${device.address}]"
                     )
                     startConnectionWatchdog(device)
                     emitStatusUpdate(null)
                 }
 
                 BluetoothProfile.STATE_DISCONNECTING -> {
+                    isHidConnecting = false
                     connectionStateStr = "DISCONNECTING"
                     appendCallbackLog(
                         "onConnectionStateChanged: DISCONNECTING from ${safeDeviceName(device)} [${device.address}]"
@@ -588,27 +842,35 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
                 }
 
                 BluetoothProfile.STATE_DISCONNECTED -> {
-                    val wasConnecting = (connectionStateStr == "CONNECTING")
-                    val wasConnected = (connectedHost?.address == device.address)
+                    val wasConnecting = isHidConnecting || (connectionStateStr == "CONNECTING")
+                    val wasConnected = isHidConnected && (connectedHost?.address == device.address)
                     cancelConnectionWatchdog()
 
                     if (connectedHost?.address == device.address) {
                         connectedHost = null
                     }
+                    isHidConnecting = false
+                    isHidConnected = false
                     lastReportBytes = byteArrayOf(0, 0, 8, 0, 0, 0, 0, 0, 0)
 
-                    val isBonded = hasBluetoothConnectPermission() &&
+                    val stillBonded = hasBluetoothConnectPermission() &&
                         device.bondState == BluetoothDevice.BOND_BONDED
-                    connectionStateStr = if (isBonded) "BONDED" else "DISCONNECTED"
+                    isBonded = stillBonded
+                    connectionStateStr = when {
+                        stillBonded -> "BONDED"
+                        isDiscoverable && isHidRegistered -> "DISCOVERABLE"
+                        else -> "DISCONNECTED"
+                    }
 
                     if (wasConnecting) {
                         val rejectMsg =
-                            "Host ${safeDeviceName(device)} [${device.address}] closed or rejected the HID connection attempt. Remove 'Game Volt Gamepad' from the host's Bluetooth list and pair again."
+                            "Host ${safeDeviceName(device)} [${device.address}] closed or rejected the L2CAP HID channel. " +
+                            "If ${safeDeviceName(device)} shows a stale pairing or failed PIN, forget/unpair on BOTH devices and pair again from the host."
                         appendCallbackLog(rejectMsg, isError = true)
                         emitStatusUpdate(rejectMsg)
                     } else {
                         appendCallbackLog(
-                            "onConnectionStateChanged: DISCONNECTED from ${safeDeviceName(device)} [${device.address}] (wasConnected=$wasConnected)"
+                            "onConnectionStateChanged: DISCONNECTED from ${safeDeviceName(device)} [${device.address}] (wasConnected=$wasConnected, stillBonded=$stillBonded)"
                         )
                         emitStatusUpdate(null)
                     }
@@ -672,6 +934,8 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
             if (connectedHost?.address == device?.address) {
                 connectedHost = null
             }
+            isHidConnected = false
+            isHidConnecting = false
             connectionStateStr = "DISCONNECTED"
             appendCallbackLog("onVirtualCableUnplug from ${safeDeviceName(device)} [${device?.address}]")
             emitStatusUpdate(null)
@@ -680,7 +944,7 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
 
     /**
      * 1. Core Interface Method: registerGamepad
-     * Obtains BluetoothProfile.HID_DEVICE proxy and registers the SDP + HID descriptor.
+     * Validates the HID descriptor, obtains BluetoothProfile.HID_DEVICE proxy, and registers SDP.
      * Waits for the real `onAppStatusChanged` callback before resolving.
      */
     @SuppressLint("MissingPermission")
@@ -688,6 +952,12 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
     fun registerGamepad(call: PluginCall) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
             val msg = "BluetoothHidDevice requires Android 9.0 (API 28) or higher."
+            appendCallbackLog(msg, isError = true)
+            call.resolve(buildFullStatusObject(msg))
+            return
+        }
+        if (!validateHidDescriptor(UNIVERSAL_GAMEPAD_HID_DESCRIPTOR)) {
+            val msg = "Internal HID Report Descriptor validation failed."
             appendCallbackLog(msg, isError = true)
             call.resolve(buildFullStatusObject(msg))
             return
@@ -715,14 +985,14 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
             return
         }
 
-        ensureHidRegisteredAsync(call)
+        ensureHidRegisteredAsync(call, isForDiscoverable = false)
     }
 
     @PermissionCallback
     private fun registerGamepadPermsCallback(call: PluginCall) {
         if (hasBluetoothConnectPermission()) {
             appendCallbackLog("Bluetooth runtime permissions granted by user.")
-            ensureHidRegisteredAsync(call)
+            ensureHidRegisteredAsync(call, isForDiscoverable = false)
         } else {
             val msg = "Bluetooth runtime permissions (BLUETOOTH_CONNECT / BLUETOOTH_ADVERTISE) were denied."
             appendCallbackLog(msg, isError = true)
@@ -731,7 +1001,7 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
     }
 
     @SuppressLint("MissingPermission")
-    private fun ensureHidRegisteredAsync(call: PluginCall) {
+    private fun ensureHidRegisteredAsync(call: PluginCall, isForDiscoverable: Boolean) {
         val adapter = bluetoothAdapter
         if (adapter == null || !adapter.isEnabled) {
             call.resolve(buildFullStatusObject("Bluetooth adapter is disabled."))
@@ -744,23 +1014,32 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
             Log.w(TAG, "Unable to set Bluetooth adapter name: ${e.message}")
         }
 
-        // If already registered with an active proxy, verify connected devices and return immediately
         val existingHid = hidDevice
         if (existingHid != null && isHidRegistered) {
             syncExistingConnectedDevices(existingHid)
-            call.resolve(buildFullStatusObject(null))
+            if (isForDiscoverable) {
+                launchDiscoverableIntent(call)
+            } else {
+                call.resolve(buildFullStatusObject(null))
+            }
             return
         }
 
-        pendingRegisterCalls.add(call)
+        if (isForDiscoverable) {
+            pendingDiscoverableCalls.add(call)
+        } else {
+            pendingRegisterCalls.add(call)
+        }
 
         // Timeout fallback so a PluginCall never hangs if OS drops binder callback
         mainHandler.postDelayed({
-            if (pendingRegisterCalls.remove(call)) {
+            val removedReg = pendingRegisterCalls.remove(call)
+            val removedDisc = pendingDiscoverableCalls.remove(call)
+            if (removedReg || removedDisc) {
                 val timeoutErr = if (isHidRegistered) {
                     null
                 } else {
-                    "Timed out waiting for BluetoothHidDevice onAppStatusChanged callback."
+                    "Timed out waiting for BluetoothHidDevice onAppStatusChanged callback. Gamepad cannot be advertised until HID registration succeeds."
                 }
                 if (timeoutErr != null) {
                     appendCallbackLog(timeoutErr, isError = true)
@@ -796,6 +1075,8 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
                     isRegisterAppInFlight.set(false)
                     hidDevice = null
                     isHidRegistered = false
+                    isHidConnecting = false
+                    isHidConnected = false
                     connectedHost = null
                     connectionStateStr = "DISCONNECTED"
                     appendCallbackLog("BluetoothProfile.HID_DEVICE service proxy disconnected.", isError = true)
@@ -815,8 +1096,9 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
             isHidProfileAvailable = false
             val msg = "BluetoothProfile.HID_DEVICE is not supported or blocked on this Android device."
             appendCallbackLog(msg, isError = true)
-            val calls = ArrayList(pendingRegisterCalls)
+            val calls = ArrayList(pendingRegisterCalls + pendingDiscoverableCalls)
             pendingRegisterCalls.clear()
+            pendingDiscoverableCalls.clear()
             for (c in calls) {
                 c.resolve(buildFullStatusObject(msg))
             }
@@ -826,10 +1108,15 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
     @SuppressLint("MissingPermission")
     private fun registerHidAppWithProxy(hid: BluetoothHidDevice) {
         if (isHidRegistered) {
-            val calls = ArrayList(pendingRegisterCalls)
+            val regCalls = ArrayList(pendingRegisterCalls)
             pendingRegisterCalls.clear()
-            for (c in calls) {
+            for (c in regCalls) {
                 c.resolve(buildFullStatusObject(null))
+            }
+            val discCalls = ArrayList(pendingDiscoverableCalls)
+            pendingDiscoverableCalls.clear()
+            for (dc in discCalls) {
+                launchDiscoverableIntent(dc)
             }
             return
         }
@@ -838,17 +1125,19 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
             return
         }
 
-        // Use SUBCLASS1_NONE and null inQos/outQos for maximum L2CAP compatibility with Windows 10/11 & Android TV
+        // Register with HID_SUBCLASS_GAMEPAD (0x08) and default L2CAP QoS (null, null)
+        // so hosts recognize a standard Gamepad (CoD 0x0508) and use Secure Simple Pairing (SSP)
+        // without asking for a 6-digit keyboard passkey.
         val sdpSettings = BluetoothHidDeviceAppSdpSettings(
             CONTROLLER_BLUETOOTH_NAME,
             "Game Volt Wireless Bluetooth HID Game Controller",
             "Game Volt",
-            BluetoothHidDevice.SUBCLASS1_NONE,
+            HID_SUBCLASS_GAMEPAD,
             UNIVERSAL_GAMEPAD_HID_DESCRIPTOR
         )
 
         appendCallbackLog(
-            "Calling BluetoothHidDevice.registerApp (descriptor=${UNIVERSAL_GAMEPAD_HID_DESCRIPTOR.size} bytes, ReportID=$REPORT_ID)..."
+            "Calling BluetoothHidDevice.registerApp(subclass=0x08 Gamepad, descriptor=${UNIVERSAL_GAMEPAD_HID_DESCRIPTOR.size}B, ReportID=$REPORT_ID)..."
         )
         val regQueued = try {
             hid.registerApp(sdpSettings, null, null, hidExecutor, hidCallback)
@@ -862,8 +1151,9 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
             val msg =
                 "BluetoothHidDevice.registerApp() returned false. Close any other controller apps using Bluetooth HID and toggle Bluetooth off/on."
             appendCallbackLog(msg, isError = true)
-            val calls = ArrayList(pendingRegisterCalls)
+            val calls = ArrayList(pendingRegisterCalls + pendingDiscoverableCalls)
             pendingRegisterCalls.clear()
+            pendingDiscoverableCalls.clear()
             for (c in calls) {
                 c.resolve(buildFullStatusObject(msg))
             }
@@ -881,6 +1171,9 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
                 connectedHost = host
                 activeTargetDevice = host
                 lastConnectedHostAddress = host.address
+                isHidConnected = true
+                isHidConnecting = false
+                isBonded = true
                 connectionStateStr = "CONNECTED"
                 pairingStatusStr = "BONDED"
             }
@@ -929,7 +1222,7 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
 
         val hid = hidDevice
         val host = connectedHost
-        if (hid == null || host == null || !isHidRegistered || connectionStateStr != "CONNECTED") {
+        if (hid == null || host == null || !isHidRegistered || !isHidConnected) {
             val ret = JSObject().apply {
                 put("sent", false)
                 put("reportHex", hexStr)
@@ -980,7 +1273,9 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
             }
         }
         connectedHost = null
-        connectionStateStr = "DISCONNECTED"
+        isHidConnected = false
+        isHidConnecting = false
+        connectionStateStr = if (isDiscoverable && isHidRegistered) "DISCOVERABLE" else "DISCONNECTED"
         call.resolve(buildFullStatusObject(null))
     }
 
@@ -1072,6 +1367,7 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
 
     /**
      * Ensures HID application is registered BEFORE launching Bluetooth discoverable mode.
+     * Never advertises the gamepad if HID registration failed.
      */
     @SuppressLint("MissingPermission")
     @PluginMethod
@@ -1086,11 +1382,9 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
         }
 
         if (!isHidRegistered) {
-            appendCallbackLog("startPairing requested before HID registered; registering HID first...")
-            val hid = hidDevice
-            if (hid != null) {
-                registerHidAppWithProxy(hid)
-            }
+            appendCallbackLog("startPairing: HID application not yet registered; registering HID before enabling discoverability...")
+            ensureHidRegisteredAsync(call, isForDiscoverable = true)
+            return
         }
 
         launchDiscoverableIntent(call)
@@ -1104,11 +1398,22 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
             call.resolve(buildFullStatusObject(msg))
             return
         }
+        if (!isHidRegistered) {
+            ensureHidRegisteredAsync(call, isForDiscoverable = true)
+            return
+        }
         launchDiscoverableIntent(call)
     }
 
     @SuppressLint("MissingPermission")
     private fun launchDiscoverableIntent(call: PluginCall) {
+        if (!isHidRegistered) {
+            val msg = "Cannot advertise Game Volt Gamepad: BluetoothHidDevice is not registered."
+            appendCallbackLog(msg, isError = true)
+            call.resolve(buildFullStatusObject(msg))
+            return
+        }
+
         try {
             bluetoothAdapter?.name = CONTROLLER_BLUETOOTH_NAME
         } catch (_: Exception) {
@@ -1122,7 +1427,7 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
             }
             context.startActivity(discoverableIntent)
             appendCallbackLog(
-                "Requested Bluetooth discoverability as '$CONTROLLER_BLUETOOTH_NAME' for ${duration}s"
+                "Requested Bluetooth discoverability as '$CONTROLLER_BLUETOOTH_NAME' (Subclass=0x08 Gamepad) for ${duration}s. Select 'Game Volt Gamepad' on your host device to pair via SSP."
             )
             call.resolve(buildFullStatusObject(null))
         } catch (e: Exception) {
@@ -1157,8 +1462,10 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
 
     /**
      * Initiates a genuine Bluetooth HID connection to a target host MAC address.
-     * Handles unbonded devices (initiates bonding first), prevents duplicate connection calls,
-     * and sets a 15-second connection watchdog timer.
+     * - Cancels discovery first so inquiry scans do not collide with bonding/L2CAP.
+     * - Prevents duplicate `createBond()` calls when already `BOND_BONDING` or `BOND_BONDED`.
+     * - Uses Classic BR/EDR (`TRANSPORT_BREDR = 1`) for unbonded hosts so dual-mode hosts
+     *   do not fail with BLE PIN/passkey errors.
      */
     @SuppressLint("MissingPermission")
     @PluginMethod
@@ -1176,7 +1483,7 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
         }
         val hid = hidDevice
         if (hid == null || !isHidRegistered) {
-            val msg = "HID profile is not registered yet. Tap 'Register Gamepad' first."
+            val msg = "HID application is not registered yet. Tap 'Register Gamepad' first."
             appendCallbackLog(msg, isError = true)
             call.resolve(buildFullStatusObject(msg))
             return
@@ -1194,6 +1501,7 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
             return
         }
 
+        cancelDiscoverySafely()
         activeTargetDevice = device
         lastConnectedHostAddress = address
 
@@ -1205,35 +1513,52 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
 
         if (existingState == BluetoothProfile.STATE_CONNECTED) {
             connectedHost = device
+            isHidConnected = true
+            isHidConnecting = false
+            isBonded = true
             connectionStateStr = "CONNECTED"
             pairingStatusStr = "BONDED"
-            appendCallbackLog("Host ${safeDeviceName(device)} [$address] is already CONNECTED.")
+            appendCallbackLog("Host ${safeDeviceName(device)} [$address] is already HID_CONNECTED.")
             call.resolve(buildFullStatusObject(null))
             return
         }
 
-        if (existingState == BluetoothProfile.STATE_CONNECTING || connectionStateStr == "CONNECTING") {
+        if (existingState == BluetoothProfile.STATE_CONNECTING || isHidConnecting) {
             appendCallbackLog(
-                "Connection attempt to ${safeDeviceName(device)} [$address] is already in progress."
+                "HID connection attempt to ${safeDeviceName(device)} [$address] is already in progress."
             )
             call.resolve(buildFullStatusObject(null))
             return
         }
 
-        // Check bond state before calling hid.connect(device)
+        // Inspect bond state before calling createBond or hid.connect(device)
         when (device.bondState) {
             BluetoothDevice.BOND_NONE -> {
+                if (bondingInProgressAddress == address || isBonding) {
+                    appendCallbackLog(
+                        "Bonding with ${safeDeviceName(device)} [$address] is already in progress; skipping duplicate createBond()."
+                    )
+                    call.resolve(buildFullStatusObject(null))
+                    return
+                }
+                bondingInProgressAddress = address
                 pendingConnectAfterBondAddress = address
+                isBonding = true
+                isBonded = false
                 pairingStatusStr = "PAIRING"
-                connectionStateStr = "PAIRING"
+                connectionStateStr = "BONDING"
                 appendCallbackLog(
-                    "Host ${safeDeviceName(device)} [$address] is unbonded; calling createBond() first..."
+                    "Host ${safeDeviceName(device)} [$address] is unbonded; starting Classic BR/EDR Secure Simple Pairing..."
                 )
-                val bondStarted = device.createBond()
+                val bondStarted = createBondBrEdr(device)
                 if (!bondStarted) {
+                    bondingInProgressAddress = null
+                    pendingConnectAfterBondAddress = null
+                    isBonding = false
                     connectionStateStr = "DISCONNECTED"
                     pairingStatusStr = "NONE"
-                    val msg = "Could not start Bluetooth bonding with ${safeDeviceName(device)} [$address]."
+                    val msg =
+                        "Could not start Bluetooth bonding with ${safeDeviceName(device)} [$address]. Make sure ${safeDeviceName(device)} is in pairing mode."
                     appendCallbackLog(msg, isError = true)
                     call.resolve(buildFullStatusObject(msg))
                     return
@@ -1243,18 +1568,27 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
             }
 
             BluetoothDevice.BOND_BONDING -> {
+                // Never call createBond() again while already BOND_BONDING
                 pendingConnectAfterBondAddress = address
+                isBonding = true
                 pairingStatusStr = "PAIRING"
-                connectionStateStr = "PAIRING"
-                appendCallbackLog("Host ${safeDeviceName(device)} [$address] is currently bonding; will connect once bonded.")
+                connectionStateStr = "BONDING"
+                appendCallbackLog(
+                    "Host ${safeDeviceName(device)} [$address] is currently BOND_BONDING; waiting for SSP completion before opening HID channel."
+                )
                 call.resolve(buildFullStatusObject(null))
                 return
             }
 
             BluetoothDevice.BOND_BONDED -> {
+                isBonding = false
+                isBonded = true
+                isHidConnecting = true
                 pairingStatusStr = "BONDED"
                 connectionStateStr = "CONNECTING"
-                appendCallbackLog("Calling BluetoothHidDevice.connect(${safeDeviceName(device)} [$address])...")
+                appendCallbackLog(
+                    "Host ${safeDeviceName(device)} [$address] is BOND_BONDED; calling BluetoothHidDevice.connect()..."
+                )
                 startConnectionWatchdog(device)
                 val initiated = try {
                     hid.connect(device)
@@ -1264,9 +1598,10 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
                 }
                 if (!initiated) {
                     cancelConnectionWatchdog()
+                    isHidConnecting = false
                     connectionStateStr = "BONDED"
                     val msg =
-                        "BluetoothHidDevice.connect(${safeDeviceName(device)}) returned false. Make sure Bluetooth is open on the host and no other HID app is active."
+                        "BluetoothHidDevice.connect(${safeDeviceName(device)}) returned false. Ensure Bluetooth is open on ${safeDeviceName(device)}, or if ${safeDeviceName(device)} forgot this phone, tap 'Forget' and re-pair."
                     appendCallbackLog(msg, isError = true)
                     call.resolve(buildFullStatusObject(msg))
                     return
@@ -1303,17 +1638,28 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
             return
         }
 
+        cancelDiscoverySafely()
         val device = bluetoothAdapter?.getRemoteDevice(targetAddr)
         if (device != null) {
             activeTargetDevice = device
-            pairingStatusStr = if (device.bondState == BluetoothDevice.BOND_BONDED) "BONDED" else "NONE"
+            val bondedNow = device.bondState == BluetoothDevice.BOND_BONDED
+            isBonded = bondedNow
+            pairingStatusStr = if (bondedNow) "BONDED" else "NONE"
+            if (!bondedNow) {
+                val msg = "Host ${safeDeviceName(device)} [$targetAddr] is no longer bonded. Pair via Bluetooth first."
+                appendCallbackLog(msg, isError = true)
+                call.resolve(buildFullStatusObject(msg))
+                return
+            }
+            isHidConnecting = true
             connectionStateStr = "CONNECTING"
-            appendCallbackLog("Reconnecting to ${safeDeviceName(device)} [$targetAddr]...")
+            appendCallbackLog("Reconnecting HID to bonded host ${safeDeviceName(device)} [$targetAddr]...")
             startConnectionWatchdog(device)
             val ok = hid.connect(device)
             if (!ok) {
                 cancelConnectionWatchdog()
-                connectionStateStr = if (device.bondState == BluetoothDevice.BOND_BONDED) "BONDED" else "DISCONNECTED"
+                isHidConnecting = false
+                connectionStateStr = "BONDED"
                 val msg = "Failed to initiate reconnection to ${safeDeviceName(device)} [$targetAddr]."
                 appendCallbackLog(msg, isError = true)
                 call.resolve(buildFullStatusObject(msg))
@@ -1332,18 +1678,29 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
     fun forgetDevice(call: PluginCall) {
         val address = call.getString("address")
         if (!address.isNullOrBlank() && hasBluetoothConnectPermission()) {
-            val device = bluetoothAdapter?.getRemoteDevice(address)
+            val device = try {
+                bluetoothAdapter?.getRemoteDevice(address)
+            } catch (_: Exception) {
+                null
+            }
             if (device != null) {
                 try {
                     if (connectedHost?.address == address) {
                         sendZeroFailsafeReportInternal()
                         hidDevice?.disconnect(device)
                         connectedHost = null
+                        isHidConnected = false
+                        isHidConnecting = false
                         connectionStateStr = "DISCONNECTED"
                     }
                     val removeBondMethod = device.javaClass.getMethod("removeBond")
-                    removeBondMethod.invoke(device)
-                    appendCallbackLog("Removed bond for ${safeDeviceName(device)} [$address]")
+                    val removed = removeBondMethod.invoke(device) as? Boolean ?: false
+                    isBonded = false
+                    isBonding = false
+                    isPairingRequested = false
+                    bondingInProgressAddress = null
+                    pendingConnectAfterBondAddress = null
+                    appendCallbackLog("Removed bond for ${safeDeviceName(device)} [$address] (removed=$removed)")
                 } catch (e: Exception) {
                     appendCallbackLog("removeBond failed for $address: ${e.message}", isError = true)
                 }
@@ -1362,12 +1719,13 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
     }
 
     /**
-     * Runs an end-to-end diagnostic self-test verifying:
+     * Runs an end-to-end 6-step diagnostic self-test verifying:
      * 1. Bluetooth Adapter & Permissions
-     * 2. BluetoothHidDevice Profile Proxy
-     * 3. HID App Registration & Descriptor Validation (67 bytes, Report ID 1 -> 9-byte input report)
-     * 4. Host Bonding & Real L2CAP HID Connection State
-     * 5. Live Neutral HID Input Report Transmission Test
+     * 2. BluetoothHidDevice Service Proxy
+     * 3. HID App Registration & 67-Byte Gamepad Descriptor Validation (Subclass 0x08 Gamepad)
+     * 4. Secure Simple Pairing (SSP) & Bond State Check
+     * 5. Host L2CAP HID Connection State
+     * 6. Live 9-Byte Neutral HID Input Report Transmission Test
      */
     @SuppressLint("MissingPermission")
     @PluginMethod
@@ -1413,14 +1771,18 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
             }
         )
 
+        val descriptorValid = validateHidDescriptor(UNIVERSAL_GAMEPAD_HID_DESCRIPTOR)
         steps.put(
             JSObject().apply {
-                put("step", "4. HID Application & Descriptor Registration")
-                put("passed", isHidRegistered)
+                put("step", "4. HID Registration & Gamepad Subclass (0x08)")
+                put("passed", isHidRegistered && descriptorValid)
                 put(
                     "detail",
-                    if (isHidRegistered) "Registered ($lastRegistrationCallbackMsg), Descriptor=${UNIVERSAL_GAMEPAD_HID_DESCRIPTOR.size}B"
-                    else "HID application not registered ($lastRegistrationCallbackMsg)."
+                    if (isHidRegistered && descriptorValid) {
+                        "Registered ($lastRegistrationCallbackMsg), Subclass=0x08 (Gamepad, SSP enabled), Descriptor=${UNIVERSAL_GAMEPAD_HID_DESCRIPTOR.size}B valid"
+                    } else {
+                        "HID application not registered ($lastRegistrationCallbackMsg)."
+                    }
                 )
             }
         )
@@ -1434,14 +1796,14 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
         }
         steps.put(
             JSObject().apply {
-                put("step", "5. Host L2CAP HID Connection")
+                put("step", "5. Host Bonding & L2CAP HID Connection")
                 put("passed", realOsConnected)
                 put(
                     "detail",
                     if (realOsConnected && host != null) {
-                        "Connected to ${safeDeviceName(host)} [${host.address}] (BondState=${bondStateToString(host.bondState)})"
+                        "HID_CONNECTED to ${safeDeviceName(host)} [${host.address}] (Bond=${bondStateToString(host.bondState)})"
                     } else {
-                        "No active Bluetooth HID host connection (Current state: $connectionStateStr)."
+                        "State=$connectionStateStr | LastVariant=$lastPairingVariantStr | LastUnbond=$lastUnbondReasonStr"
                     }
                 )
             }
@@ -1459,7 +1821,7 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
                 put(
                     "detail",
                     if (testReportSent) "Successfully transmitted 9-byte HID input report [00 00 08 00 00 00 00 00 00] to host."
-                    else "Skipped/Failed: Host must be in CONNECTED state to transmit HID reports."
+                    else "Skipped/Failed: Host must be in HID_CONNECTED state to transmit HID reports."
                 )
             }
         )
@@ -1497,7 +1859,7 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
     private fun bondStateToString(bondState: Int): String {
         return when (bondState) {
             BluetoothDevice.BOND_BONDED -> "BONDED"
-            BluetoothDevice.BOND_BONDING -> "PAIRING"
+            BluetoothDevice.BOND_BONDING -> "BONDING"
             else -> "NONE"
         }
     }
@@ -1534,9 +1896,9 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
                 "Compatible with Android TV, Google TV, and Smart TVs supporting Bluetooth HID gamepads."
             )
             BluetoothClass.Device.Major.PHONE -> Triple(
-                "Mobile Host",
+                "Android / Mobile Host",
                 true,
-                "Supports standard Bluetooth HID Gamepad."
+                "Supports standard Bluetooth HID Gamepad (initiate pairing from host Bluetooth settings)."
             )
             else -> Triple(
                 "Bluetooth Host",
@@ -1559,8 +1921,7 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
         } else {
             BluetoothProfile.STATE_DISCONNECTED
         }
-        val isActuallyConnected = (osConnState == BluetoothProfile.STATE_CONNECTED) ||
-            (connectedHost?.address == device.address && connectionStateStr == "CONNECTED")
+        val isActuallyConnected = (osConnState == BluetoothProfile.STATE_CONNECTED) && isHidConnected
 
         return JSObject().apply {
             put("name", safeDeviceName(device))
@@ -1588,7 +1949,7 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
 
         val host = connectedHost
         val target = host ?: activeTargetDevice
-        val connectedObj = if (host != null && hasBluetoothConnectPermission()) {
+        val connectedObj = if (host != null && isHidConnected && hasBluetoothConnectPermission()) {
             buildDeviceJSObject(host)
         } else {
             null
@@ -1599,19 +1960,41 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
             logsArray.put(entry)
         }
 
+        val targetBondState = if (target != null && hasBluetoothConnectPermission()) {
+            target.bondState
+        } else {
+            BluetoothDevice.BOND_NONE
+        }
+
+        val actualBonded = (host != null && isHidConnected) ||
+            (targetBondState == BluetoothDevice.BOND_BONDED) ||
+            isBonded
+        val actualBonding = (targetBondState == BluetoothDevice.BOND_BONDING) || isBonding
+
         val effectivePairingStatus = when {
-            host != null -> "BONDED"
-            target != null && hasBluetoothConnectPermission() -> bondStateToString(target.bondState)
-            else -> pairingStatusStr
+            actualBonded -> "BONDED"
+            actualBonding || isPairingRequested -> "PAIRING"
+            else -> "NONE"
         }
 
         val effectiveConnectionState = when {
-            host != null && connectionStateStr == "CONNECTED" -> "CONNECTED"
-            connectionStateStr == "CONNECTING" -> "CONNECTING"
-            connectionStateStr == "PAIRING" -> "PAIRING"
-            isDiscoverable && connectionStateStr == "DISCONNECTED" -> "DISCOVERABLE"
-            effectivePairingStatus == "BONDED" && connectionStateStr == "BONDED" -> "BONDED"
-            else -> connectionStateStr
+            host != null && isHidConnected -> "CONNECTED"
+            isHidConnecting -> "CONNECTING"
+            actualBonding || isPairingRequested -> "PAIRING"
+            actualBonded && connectionStateStr == "BONDED" -> "BONDED"
+            isDiscoverable && isHidRegistered -> "DISCOVERABLE"
+            else -> "DISCONNECTED"
+        }
+
+        val granularLifecycleState = when {
+            host != null && isHidConnected -> "HID_CONNECTED"
+            isHidConnecting -> "HID_CONNECTING"
+            actualBonding -> "BONDING"
+            isPairingRequested -> "PAIRING_REQUESTED"
+            actualBonded -> "BONDED"
+            isDiscoverable && isHidRegistered -> "DISCOVERABLE"
+            isHidRegistered -> "HID_REGISTERED"
+            else -> "DISCONNECTED"
         }
 
         return JSObject().apply {
@@ -1621,7 +2004,16 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
             put("hidRegistered", isHidRegistered)
             put("registrationCallbackMessage", lastRegistrationCallbackMsg)
             put("discoverable", isDiscoverable)
+            put("pairingRequested", isPairingRequested)
+            put("bonding", actualBonding)
+            put("bonded", actualBonded)
+            put("hidConnecting", isHidConnecting)
+            put("hidConnected", host != null && isHidConnected)
+            put("disconnected", host == null || !isHidConnected)
+            put("lifecycleState", granularLifecycleState)
             put("pairingStatus", effectivePairingStatus)
+            put("lastPairingVariant", lastPairingVariantStr)
+            put("lastUnbondReason", lastUnbondReasonStr)
             put("hostDeviceAddress", target?.address ?: lastConnectedHostAddress ?: "None")
             put("connectionState", effectiveConnectionState)
             put("connectedHost", connectedObj)

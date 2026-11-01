@@ -33,7 +33,6 @@ import {
 import {
   CONTROLLER_BLUETOOTH_IDENTITY,
   EncodedHidReport,
-  HOST_COMPATIBILITY_PROFILES,
   HostCompatibilityProfile,
   HostPlatformId,
 } from '../nativeBridgeCode';
@@ -132,9 +131,6 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
   onSelectTab,
   onClose,
   status,
-  connectedDeviceName,
-  latencyMs,
-  messagesPerSecond,
   autoReconnect,
   onToggleAutoReconnect,
   roomCode,
@@ -151,24 +147,10 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
   onScanForReceivers,
   onConnect,
   onDisconnect,
-  adapterStatus,
-  hidProfileAvailable,
-  hidRegistrationStatus,
-  registrationCallbackMessage,
-  isDiscoverable,
-  pairingStatus,
-  hostDeviceAddress,
   btStatus,
   btDeviceName,
   btError,
-  callbackLogs,
-  diagnosticResult,
   pairedHosts,
-  btReportsSent,
-  lastHidReport,
-  selectedHostPlatform,
-  onSelectHostPlatform,
-  activeHostCompatibility,
   onRegisterNativeHid,
   onStartBluetoothPairing,
   onOpenBluetoothSettings,
@@ -177,7 +159,6 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
   onReconnectLastHost,
   onForgetBluetoothHost,
   onDisconnectBluetooth,
-  onRunBluetoothDiagnosticTest,
   controllerState,
   remoteReceivedState,
   onToggleLiveTestHud,
@@ -191,7 +172,6 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
 }) => {
   const [copiedLink, setCopiedLink] = useState(false);
   const [newProfileName, setNewProfileName] = useState('');
-  const [showBtDiagnostics, setShowBtDiagnostics] = useState(true);
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
 
   if (activeTab === 'none') return null;
@@ -293,8 +273,13 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
                   <div className="flex items-center gap-2">
                     <Bluetooth className="w-4 h-4 text-blue-400" />
                     <h2 className="text-sm font-bold text-white">
-                      {CONTROLLER_BLUETOOTH_IDENTITY} (Bluetooth HID)
+                      {CONTROLLER_BLUETOOTH_IDENTITY}
                     </h2>
+                    {btDeviceName && btDeviceName !== 'No Host Connected' && (
+                      <span className="text-xs text-zinc-400 font-medium">
+                        · {btDeviceName}
+                      </span>
+                    )}
                   </div>
 
                   <span
@@ -323,78 +308,6 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
                   </span>
                 </div>
 
-                {/* Compact Status Row */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  <div className="p-2.5 rounded-lg bg-[#090a0f] border border-zinc-800">
-                    <div className="text-[10px] uppercase text-zinc-400 font-bold">Bluetooth</div>
-                    <div
-                      className={`text-xs font-bold font-mono-tabular mt-0.5 ${
-                        adapterStatus === 'ENABLED' ? 'text-emerald-400' : 'text-amber-300'
-                      }`}
-                    >
-                      {adapterStatus}
-                    </div>
-                  </div>
-                  <div className="p-2.5 rounded-lg bg-[#090a0f] border border-zinc-800">
-                    <div className="text-[10px] uppercase text-zinc-400 font-bold">HID Profile</div>
-                    <div
-                      className={`text-xs font-bold font-mono-tabular mt-0.5 ${
-                        hidRegistrationStatus === 'REGISTERED' ? 'text-emerald-400' : 'text-zinc-400'
-                      }`}
-                    >
-                      {hidRegistrationStatus}
-                    </div>
-                  </div>
-                  <div className="p-2.5 rounded-lg bg-[#090a0f] border border-zinc-800">
-                    <div className="text-[10px] uppercase text-zinc-400 font-bold">Bond / Advertising</div>
-                    <div
-                      className={`text-xs font-bold font-mono-tabular mt-0.5 ${
-                        pairingStatus === 'BONDED'
-                          ? 'text-emerald-400'
-                          : isDiscoverable
-                          ? 'text-pink-400'
-                          : 'text-zinc-400'
-                      }`}
-                    >
-                      {pairingStatus} · {isDiscoverable ? 'DISCOVERABLE' : 'HIDDEN'}
-                    </div>
-                  </div>
-                  <div className="p-2.5 rounded-lg bg-[#090a0f] border border-zinc-800">
-                    <div className="text-[10px] uppercase text-zinc-400 font-bold">Host</div>
-                    <div className="text-xs font-bold text-white mt-0.5 truncate">
-                      {btDeviceName}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Target Host Preset Buttons */}
-                <div className="flex flex-wrap gap-1.5">
-                  {HOST_COMPATIBILITY_PROFILES.map((plat) => (
-                    <button
-                      key={plat.id}
-                      onClick={() => {
-                        onSelectHostPlatform(plat.id);
-                        onUpdateProfile({ layoutPreset: plat.recommendedLayout });
-                      }}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition-all ${
-                        selectedHostPlatform === plat.id
-                          ? 'bg-blue-600/25 border-blue-500 text-white'
-                          : 'bg-[#090a0e] border-zinc-800 text-zinc-400 hover:text-zinc-200'
-                      }`}
-                    >
-                      {plat.name}
-                    </button>
-                  ))}
-                </div>
-
-                {/* Host Pairing & Compatibility Guidance */}
-                <div className="p-2.5 rounded-lg bg-[#090a0f] border border-zinc-800/90 text-xs space-y-1">
-                  <div className="font-semibold text-blue-300">
-                    {activeHostCompatibility.name}: {activeHostCompatibility.pairingSteps}
-                  </div>
-                  <div className="text-zinc-400 text-[11px]">{activeHostCompatibility.notes}</div>
-                </div>
-
                 {btError && (
                   <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center gap-2 text-xs text-amber-200">
                     <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
@@ -405,19 +318,19 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
                 {/* Bluetooth Controls */}
                 <div className="flex flex-wrap items-center gap-2">
                   <button
-                    onClick={onRegisterNativeHid}
-                    className="px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold flex items-center gap-1.5"
-                  >
-                    <Bluetooth className="w-3.5 h-3.5" />
-                    Register Gamepad
-                  </button>
-
-                  <button
                     onClick={onStartBluetoothPairing}
                     className="px-3.5 py-2 rounded-lg bg-gradient-to-r from-pink-600 to-purple-600 hover:from-pink-500 hover:to-purple-500 text-white text-xs font-bold flex items-center gap-1.5"
                   >
                     <Radar className="w-3.5 h-3.5" />
                     Start Pairing
+                  </button>
+
+                  <button
+                    onClick={onRegisterNativeHid}
+                    className="px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold flex items-center gap-1.5"
+                  >
+                    <Bluetooth className="w-3.5 h-3.5" />
+                    Register Gamepad
                   </button>
 
                   <button
@@ -453,14 +366,6 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
                   )}
 
                   <button
-                    onClick={onRunBluetoothDiagnosticTest}
-                    className="px-3 py-2 rounded-lg bg-purple-600/25 hover:bg-purple-600/40 border border-purple-500/50 text-purple-200 text-xs font-bold flex items-center gap-1.5"
-                  >
-                    <Activity className="w-3.5 h-3.5" />
-                    Run HID Diagnostic
-                  </button>
-
-                  <button
                     onClick={() => {
                       onToggleLiveTestHud(true);
                       onClose();
@@ -483,7 +388,7 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
                         <div className="min-w-0 pr-2">
                           <div className="text-xs font-bold text-white truncate">{host.name}</div>
                           <div className="text-[10px] font-mono-tabular text-zinc-400">
-                            {host.address} · {host.bondState || 'BONDED'} · {host.deviceType}
+                            {host.address}
                           </div>
                         </div>
                         <div className="flex items-center gap-1.5 shrink-0">
@@ -509,130 +414,6 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
                     ))}
                   </div>
                 )}
-
-                {/* Detailed Bluetooth HID Connection Diagnostics Section */}
-                <div className="pt-3 border-t border-zinc-800 space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-zinc-200 flex items-center gap-1.5">
-                      <Activity className="w-3.5 h-3.5 text-blue-400" />
-                      Bluetooth HID Connection Diagnostics
-                    </span>
-                    <button
-                      onClick={() => setShowBtDiagnostics((v) => !v)}
-                      className="text-[11px] text-zinc-400 hover:text-white font-semibold"
-                    >
-                      {showBtDiagnostics ? 'Hide Details' : 'Show Details'}
-                    </button>
-                  </div>
-
-                  {showBtDiagnostics && (
-                    <div className="space-y-2.5">
-                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px] font-mono-tabular">
-                        <div className="p-2 rounded bg-[#090a0f] border border-zinc-800">
-                          <div className="text-zinc-500 text-[10px]">1. Adapter Status</div>
-                          <div className="text-zinc-200 font-bold">{adapterStatus}</div>
-                        </div>
-                        <div className="p-2 rounded bg-[#090a0f] border border-zinc-800">
-                          <div className="text-zinc-500 text-[10px]">2. BluetoothHidDevice API</div>
-                          <div className="text-zinc-200 font-bold">
-                            {hidProfileAvailable ? 'AVAILABLE' : 'UNAVAILABLE'}
-                          </div>
-                        </div>
-                        <div className="p-2 rounded bg-[#090a0f] border border-zinc-800">
-                          <div className="text-zinc-500 text-[10px]">3. HID Registration</div>
-                          <div className="text-zinc-200 font-bold">{hidRegistrationStatus}</div>
-                        </div>
-                        <div className="p-2 rounded bg-[#090a0f] border border-zinc-800">
-                          <div className="text-zinc-500 text-[10px]">4. Advertising Status</div>
-                          <div className="text-zinc-200 font-bold">
-                            {isDiscoverable ? 'DISCOVERABLE' : 'NOT ADVERTISING'}
-                          </div>
-                        </div>
-                        <div className="p-2 rounded bg-[#090a0f] border border-zinc-800">
-                          <div className="text-zinc-500 text-[10px]">5. Host Device Address</div>
-                          <div className="text-zinc-200 font-bold truncate">{hostDeviceAddress}</div>
-                        </div>
-                        <div className="p-2 rounded bg-[#090a0f] border border-zinc-800">
-                          <div className="text-zinc-500 text-[10px]">6. Pairing / Bonding</div>
-                          <div className="text-zinc-200 font-bold">{pairingStatus}</div>
-                        </div>
-                        <div className="p-2 rounded bg-[#090a0f] border border-zinc-800">
-                          <div className="text-zinc-500 text-[10px]">7. Connection State</div>
-                          <div className="text-blue-400 font-bold">
-                            {btStatus === 'CONNECTED_NATIVE_HID' ? 'CONNECTED' : btStatus}
-                          </div>
-                        </div>
-                        <div className="p-2 rounded bg-[#090a0f] border border-zinc-800 sm:col-span-2">
-                          <div className="text-zinc-500 text-[10px]">8. HID Registration Callback</div>
-                          <div className="text-zinc-200 font-bold truncate">
-                            {registrationCallbackMessage}
-                          </div>
-                        </div>
-                        <div className="p-2 rounded bg-[#090a0f] border border-zinc-800 sm:col-span-3">
-                          <div className="text-zinc-500 text-[10px]">
-                            9. Last Bluetooth Error · Reports Sent ({btReportsSent})
-                          </div>
-                          <div className="text-amber-300 font-bold">
-                            {btError || 'None (No errors recorded)'}
-                          </div>
-                        </div>
-                      </div>
-
-                      {diagnosticResult && (
-                        <div className="p-2.5 rounded-lg bg-[#090a0f] border border-purple-500/40 space-y-1.5">
-                          <div className="flex items-center justify-between text-xs font-bold">
-                            <span className="text-purple-300">
-                              Bluetooth HID Diagnostic Self-Test Results
-                            </span>
-                            <span
-                              className={
-                                diagnosticResult.allPassed
-                                  ? 'text-emerald-400'
-                                  : diagnosticResult.readyForPairing
-                                  ? 'text-blue-400'
-                                  : 'text-amber-400'
-                              }
-                            >
-                              {diagnosticResult.allPassed
-                                ? 'ALL 6 CHECKS PASSED'
-                                : diagnosticResult.readyForPairing
-                                ? 'HID READY (AWAITING HOST CONNECTION)'
-                                : 'ACTION REQUIRED'}
-                            </span>
-                          </div>
-                          <div className="space-y-1 text-[11px] font-mono-tabular">
-                            {diagnosticResult.steps.map((s, idx) => (
-                              <div key={idx} className="flex items-start gap-2">
-                                <span
-                                  className={
-                                    s.passed ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'
-                                  }
-                                >
-                                  {s.passed ? '[PASS]' : '[WARN]'}
-                                </span>
-                                <span className="text-zinc-200 font-semibold">{s.step}:</span>
-                                <span className="text-zinc-400">{s.detail}</span>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      <div className="p-2.5 rounded-lg bg-[#090a0f] border border-zinc-800 space-y-1">
-                        <div className="text-[10px] uppercase text-zinc-500 font-bold">
-                          10. Native BluetoothHidDevice Callback Log (Logcat Tag: GameVoltBT_HID)
-                        </div>
-                        <div className="max-h-28 overflow-y-auto text-[11px] font-mono-tabular text-zinc-300 space-y-0.5">
-                          {callbackLogs.length > 0 ? (
-                            callbackLogs.map((line, i) => <div key={i}>{line}</div>)
-                          ) : (
-                            <div className="text-zinc-500">No native callback events logged yet.</div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
               </div>
 
               {/* Wi-Fi / LAN Connection & QR Pair */}
@@ -761,10 +542,6 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
                         Disconnect
                       </button>
                     )}
-
-                    <div className="ml-auto text-xs font-mono-tabular text-zinc-400">
-                      {status} · {latencyMs !== null ? `${latencyMs}ms` : '—'}
-                    </div>
                   </div>
 
                   {discoveredReceivers.length > 0 && (
@@ -857,45 +634,9 @@ export const ControlCenterDrawer: React.FC<ControlCenterDrawerProps> = ({
             </div>
           )}
 
-          {/* TAB 2: CONTROLLER TEST & DIAGNOSTICS */}
+          {/* TAB 2: CONTROLLER TEST */}
           {currentTab === 'test' && (
             <div className="space-y-4">
-              {/* Compact Telemetry Summary */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                <div className="p-3 rounded-xl bg-[#13151d] border border-zinc-800/90">
-                  <div className="text-[10px] text-zinc-400 uppercase font-bold">Connection</div>
-                  <div
-                    className={`text-xs font-bold font-mono-tabular mt-1 ${
-                      status === 'CONNECTED' ? 'text-emerald-400' : 'text-zinc-400'
-                    }`}
-                  >
-                    {status} ({connectedDeviceName})
-                  </div>
-                </div>
-                <div className="p-3 rounded-xl bg-[#13151d] border border-zinc-800/90">
-                  <div className="text-[10px] text-zinc-400 uppercase font-bold">Bluetooth HID</div>
-                  <div className="text-xs font-bold font-mono-tabular text-blue-400 mt-1">
-                    {btStatus}
-                  </div>
-                </div>
-                <div className="p-3 rounded-xl bg-[#13151d] border border-zinc-800/90">
-                  <div className="text-[10px] text-zinc-400 uppercase font-bold">
-                    HID Report (9B)
-                  </div>
-                  <div className="text-xs font-bold font-mono-tabular text-emerald-400 mt-1">
-                    [{lastHidReport.rawHex}]
-                  </div>
-                </div>
-                <div className="p-3 rounded-xl bg-[#13151d] border border-zinc-800/90">
-                  <div className="text-[10px] text-zinc-400 uppercase font-bold">
-                    Latency / Rate
-                  </div>
-                  <div className="text-xs font-bold font-mono-tabular text-pink-400 mt-1">
-                    {latencyMs !== null ? `${latencyMs}ms` : '—'} · {messagesPerSecond} msg/s
-                  </div>
-                </div>
-              </div>
-
               <div className="p-4 rounded-xl bg-[#13151d] border border-zinc-800/90 space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-3">
