@@ -173,7 +173,7 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
         0xA1.toByte(), 0x01.toByte(),       // Collection (Application)
         0x85.toByte(), REPORT_ID.toByte(),  //   Report ID (1)
 
-        // 16 Buttons (2 Bytes: Byte 0 and Byte 1)
+        // 16 Buttons (2 Bytes)
         0x05.toByte(), 0x09.toByte(),       //   Usage Page (Button)
         0x19.toByte(), 0x01.toByte(),       //   Usage Minimum (Button 1)
         0x29.toByte(), 0x10.toByte(),       //   Usage Maximum (Button 16)
@@ -195,33 +195,33 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
         0x95.toByte(), 0x01.toByte(),       //   Report Count (1)
         0x81.toByte(), 0x42.toByte(),       //   Input (Data,Var,Abs,Null)
 
-        // Reset Global Unit & Physical bounds so following axes are linear
+        // Reset Global Unit & Physical bounds for linear axes
         0x65.toByte(), 0x00.toByte(),       //   Unit (None)
         0x45.toByte(), 0x00.toByte(),       //   Physical Maximum (0)
         0x75.toByte(), 0x04.toByte(),       //   Report Size (4 bits padding)
         0x95.toByte(), 0x01.toByte(),       //   Report Count (1)
         0x81.toByte(), 0x01.toByte(),       //   Input (Const,Array,Abs)
 
-        // 4 Analog Thumbstick Axes: X, Y, Z, Rz (4 Bytes, -127..+127)
+        // 4 Analog Thumbstick Axes: LX, LY, RX, RY (4 Bytes, -127..+127)
         0x05.toByte(), 0x01.toByte(),       //   Usage Page (Generic Desktop Ctrls)
-        0x09.toByte(), 0x30.toByte(),       //   Usage (X - Left Stick X)
-        0x09.toByte(), 0x31.toByte(),       //   Usage (Y - Left Stick Y)
-        0x09.toByte(), 0x32.toByte(),       //   Usage (Z - Right Stick X)
-        0x09.toByte(), 0x35.toByte(),       //   Usage (Rz - Right Stick Y)
+        0x09.toByte(), 0x30.toByte(),       //   Usage (X)
+        0x09.toByte(), 0x31.toByte(),       //   Usage (Y)
+        0x09.toByte(), 0x32.toByte(),       //   Usage (Z)
+        0x09.toByte(), 0x35.toByte(),       //   Usage (Rz)
         0x15.toByte(), 0x81.toByte(),       //   Logical Minimum (-127)
         0x25.toByte(), 0x7F.toByte(),       //   Logical Maximum (+127)
         0x75.toByte(), 0x08.toByte(),       //   Report Size (8 bits)
-        0x95.toByte(), 0x04.toByte(),       //   Report Count (4)
+        0x95.toByte(), 0x04.toByte(),       //   Report Count (4 axes)
         0x81.toByte(), 0x02.toByte(),       //   Input (Data,Var,Abs)
 
-        // 2 Analog Triggers: Brake (LT) & Accelerator (RT) (2 Bytes, 0..255)
+        // 2 Analog Triggers: LT & RT (2 Bytes, 0..255)
         0x05.toByte(), 0x02.toByte(),       //   Usage Page (Simulation Controls)
         0x09.toByte(), 0xC5.toByte(),       //   Usage (Brake - LT)
         0x09.toByte(), 0xC4.toByte(),       //   Usage (Accelerator - RT)
         0x15.toByte(), 0x00.toByte(),       //   Logical Minimum (0)
         0x26.toByte(), 0xFF.toByte(), 0x00.toByte(), // Logical Maximum (255)
         0x75.toByte(), 0x08.toByte(),       //   Report Size (8 bits)
-        0x95.toByte(), 0x02.toByte(),       //   Report Count (2)
+        0x95.toByte(), 0x02.toByte(),       //   Report Count (2 triggers)
         0x81.toByte(), 0x02.toByte(),       //   Input (Data,Var,Abs)
 
         0xC0.toByte()                       // End Collection
@@ -232,7 +232,8 @@ class GameVoltBluetoothGamepadPlugin : Plugin() {
      * Application Collection Usage Page 0x01 (Generic Desktop) / Usage 0x05 (Game Pad) with Report ID 1.
      */
     private fun validateHidDescriptor(descriptor: ByteArray): Boolean {
-        if (descriptor.size != 67) return false
+        // The standards-compliant 9-byte payload descriptor constructed above is 89 bytes.
+        if (descriptor.size != 89) return false
         val hasGamepadHeader =
             descriptor[0] == 0x05.toByte() &&
             descriptor[1] == 0x01.toByte() &&
