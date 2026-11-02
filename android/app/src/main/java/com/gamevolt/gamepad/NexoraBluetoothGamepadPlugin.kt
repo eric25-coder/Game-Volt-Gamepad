@@ -118,9 +118,7 @@ class NexoraBluetoothGamepadPlugin : Plugin() {
         0x95.toByte(), 0x01.toByte(),       //   Report Count (1)
         0x81.toByte(), 0x42.toByte(),       //   Input (Data,Var,Abs,Null)
 
-        // Reset Global Unit & Physical bounds for linear axes
-        0x65.toByte(), 0x00.toByte(),       //   Unit (None)
-        0x45.toByte(), 0x00.toByte(),       //   Physical Maximum (0)
+        // Padding for Hat Switch Byte
         0x75.toByte(), 0x04.toByte(),       //   Report Size (4 bits padding)
         0x95.toByte(), 0x01.toByte(),       //   Report Count (1)
         0x81.toByte(), 0x01.toByte(),       //   Input (Const,Array,Abs)
@@ -133,6 +131,8 @@ class NexoraBluetoothGamepadPlugin : Plugin() {
         0x09.toByte(), 0x35.toByte(),       //   Usage (Rz)
         0x15.toByte(), 0x81.toByte(),       //   Logical Minimum (-127)
         0x25.toByte(), 0x7F.toByte(),       //   Logical Maximum (+127)
+        0x35.toByte(), 0x81.toByte(),       //   Physical Minimum (-127)
+        0x46.toByte(), 0x7F.toByte(), 0x00.toByte(), // Physical Maximum (+127)
         0x75.toByte(), 0x08.toByte(),       //   Report Size (8 bits)
         0x95.toByte(), 0x04.toByte(),       //   Report Count (4 axes)
         0x81.toByte(), 0x02.toByte(),       //   Input (Data,Var,Abs)
@@ -143,6 +143,8 @@ class NexoraBluetoothGamepadPlugin : Plugin() {
         0x09.toByte(), 0xC4.toByte(),       //   Usage (Accelerator - RT)
         0x15.toByte(), 0x00.toByte(),       //   Logical Minimum (0)
         0x26.toByte(), 0xFF.toByte(), 0x00.toByte(), // Logical Maximum (255)
+        0x35.toByte(), 0x00.toByte(),       //   Physical Minimum (0)
+        0x46.toByte(), 0xFF.toByte(), 0x00.toByte(), // Physical Maximum (255)
         0x75.toByte(), 0x08.toByte(),       //   Report Size (8 bits)
         0x95.toByte(), 0x02.toByte(),       //   Report Count (2 triggers)
         0x81.toByte(), 0x02.toByte(),       //   Input (Data,Var,Abs)
